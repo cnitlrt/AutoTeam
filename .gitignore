@@ -4,6 +4,7 @@ __pycache__/
 /dist/
 .venv/
 screenshots/
+logs/
 auth_state/
 auths/
 accounts.json

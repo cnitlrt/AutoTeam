@@ -147,6 +147,26 @@ def get_standby():
     return [_sanitize_account(a) for a in accounts]
 
 
+@app.delete("/api/accounts/{email:path}")
+def delete_account(email: str):
+    """删除本地账号记录和本地认证文件，不移除 Team 成员。"""
+    from autoteam.accounts import load_accounts, save_accounts
+
+    accounts = load_accounts()
+    target = next((a for a in accounts if a.get("email") == email), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    auth_file = target.get("auth_file")
+    if auth_file:
+        auth_path = Path(auth_file)
+        if auth_path.exists():
+            auth_path.unlink()
+
+    save_accounts([a for a in accounts if a.get("email") != email])
+    return {"message": "账号已删除", "email": email}
+
+
 @app.get("/api/status")
 def get_status():
     """获取所有账号状态 + active 账号实时额度"""
@@ -285,7 +305,7 @@ _auto_check_restart = threading.Event()  # 配置变更时通知线程重启
 
 def _auto_check_loop():
     """后台巡检线程：定期检查额度，多个账号低于阈值时自动轮转"""
-    from autoteam.accounts import load_accounts, STATUS_ACTIVE
+    from autoteam.accounts import load_accounts, STATUS_ACTIVE, STATUS_EXHAUSTED
     from autoteam.codex_auth import check_codex_quota
 
     while not _auto_check_stop.is_set():
@@ -305,8 +325,9 @@ def _auto_check_loop():
             accounts = load_accounts()
             active = [a for a in accounts if a["status"] == STATUS_ACTIVE
                       and a.get("auth_file") and Path(a["auth_file"]).exists()]
+            existing_exhausted = [a for a in accounts if a["status"] == STATUS_EXHAUSTED]
 
-            if not active:
+            if not active and not existing_exhausted:
                 continue
 
             low_accounts = []
@@ -331,7 +352,9 @@ def _auto_check_loop():
                             len(low_accounts),
                             ", ".join(f"{e}({r}%)" for e, r in low_accounts))
 
-            if len(low_accounts) >= cfg["min_low"]:
+            should_rotate = len(low_accounts) >= cfg["min_low"] or bool(existing_exhausted)
+
+            if should_rotate:
                 # 检查是否有任务在跑
                 if not _playwright_lock.acquire(blocking=False):
                     logger.info("[巡检] 有任务正在执行，跳过本轮自动轮转")
@@ -339,10 +362,12 @@ def _auto_check_loop():
                 _playwright_lock.release()
 
                 # 将低于阈值的账号标记为 exhausted，rotate 会自动移出并补充
-                from autoteam.accounts import update_account, STATUS_EXHAUSTED
+                from autoteam.accounts import update_account
                 for email, remaining in low_accounts:
                     logger.info("[巡检] %s 剩余 %d%%，标记为 exhausted", email, remaining)
                     update_account(email, status=STATUS_EXHAUSTED, quota_exhausted_at=time.time())
+                if existing_exhausted:
+                    logger.info("[巡检] 发现 %d 个遗留 exhausted 账号，触发轮转清理", len(existing_exhausted))
 
                 logger.info("[巡检] 触发自动轮转...")
                 from autoteam.manager import cmd_rotate

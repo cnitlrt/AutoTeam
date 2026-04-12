@@ -54,6 +54,156 @@ def _screenshot(page, name):
     page.screenshot(path=str(SCREENSHOT_DIR / name), full_page=True)
 
 
+def _click_primary_auth_button(page, labels=("Continue", "继续"), timeout=3000):
+    """Click the primary email/password submit button without matching social login buttons."""
+    for label in labels:
+        try:
+            btn = page.get_by_role("button", name=label, exact=True).first
+            if btn.is_visible(timeout=timeout):
+                btn.click()
+                return True
+        except Exception:
+            pass
+
+    try:
+        page.locator('button[type="submit"]').last.click()
+        return True
+    except Exception:
+        return False
+
+
+def _fill_input_verified(locator, value, attempts=3, delay=0.8):
+    """Fill an input and verify the frontend kept the value."""
+    for _ in range(attempts):
+        try:
+            locator.click()
+            locator.fill(value)
+            time.sleep(delay)
+            if locator.input_value() == value:
+                return True
+
+            locator.click()
+            locator.press("Control+A")
+            locator.press("Backspace")
+            locator.type(value, delay=60)
+            time.sleep(delay)
+            if locator.input_value() == value:
+                return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False
+
+
+def _fill_email_if_visible(page, email, timeout=5000):
+    try:
+        email_input = page.locator('input[name="email"], input[id="email-input"], input[id="email"], input[type="email"]').first
+        if email_input.is_visible(timeout=timeout):
+            return _fill_input_verified(email_input, email)
+    except Exception:
+        pass
+    return False
+
+
+def _fill_password_if_visible(page, password, timeout=3000):
+    try:
+        pwd_input = page.locator('input[name="password"], input[type="password"]').first
+        if pwd_input.is_visible(timeout=timeout):
+            if not _fill_input_verified(pwd_input, password):
+                return False
+            time.sleep(0.5)
+            _click_primary_auth_button(page, labels=("Continue", "继续", "Log in", "登录"))
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _set_input_value_dom(page, locator, value):
+    """Set an input through the native setter and dispatch browser events."""
+    try:
+        return page.evaluate(
+            '''([el, value]) => {
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+                setter.call(el, value);
+                el.dispatchEvent(new Event("input", { bubbles: true }));
+                el.dispatchEvent(new Event("change", { bubbles: true }));
+                el.dispatchEvent(new Event("blur", { bubbles: true }));
+                return el.value;
+            }''',
+            [locator.element_handle(), value],
+        ) == value
+    except Exception:
+        return False
+
+
+def _visible_inputs(page):
+    inputs = []
+    for inp in page.locator("input").all():
+        try:
+            if inp.is_visible(timeout=300):
+                box = inp.bounding_box()
+                if box and box.get("width", 0) > 20 and box.get("height", 0) > 10:
+                    inputs.append((box["y"], box["x"], inp))
+        except Exception:
+            continue
+    inputs.sort(key=lambda item: (item[0], item[1]))
+    return [inp for _, _, inp in inputs]
+
+
+def _fill_about_you(page, log_prefix="[注册]"):
+    """Fill OpenAI's about-you page using visible field order, not unstable attributes."""
+    if "about-you" not in page.url:
+        return False
+
+    inputs = _visible_inputs(page)
+    if len(inputs) < 2:
+        logger.warning("%s about-you 未找到足够的可见输入框", log_prefix)
+        return False
+
+    name_input = inputs[0]
+    age_input = inputs[1]
+
+    name_ok = _fill_input_verified(name_input, "User") or _set_input_value_dom(page, name_input, "User")
+    age_ok = _fill_input_verified(age_input, "25") or _set_input_value_dom(page, age_input, "25")
+
+    if not age_ok:
+        try:
+            box = age_input.bounding_box()
+            if box:
+                page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+                page.keyboard.type("25", delay=80)
+                time.sleep(0.8)
+                age_ok = age_input.input_value() == "25"
+        except Exception:
+            pass
+
+    if name_ok:
+        logger.info("%s 填入姓名: User", log_prefix)
+    else:
+        logger.warning("%s 姓名输入未生效", log_prefix)
+
+    if age_ok:
+        logger.info("%s 填入年龄: 25", log_prefix)
+    else:
+        try:
+            current = age_input.input_value()
+        except Exception:
+            current = ""
+        logger.warning("%s 年龄输入未生效，当前值: %s", log_prefix, current)
+
+    if name_ok and age_ok:
+        _click_primary_auth_button(
+            page,
+            labels=("完成帐户创建", "Finish creating account", "Continue", "继续", "Complete"),
+        )
+        return True
+
+    return False
+
+
 def login_codex_via_browser(email, password, mail_client=None):
     """
     通过 Playwright 自动完成 Codex OAuth 登录。
@@ -63,7 +213,7 @@ def login_codex_via_browser(email, password, mail_client=None):
     code_verifier, code_challenge = _generate_pkce()
     state = secrets.token_urlsafe(16)
 
-    from autoteam.config import CHATGPT_ACCOUNT_ID
+    from autoteam.config import CHATGPT_ACCOUNT_ID, CHATGPT_WORKSPACE_NAME
 
     # 构建 OAuth URL
     params = {
@@ -132,33 +282,20 @@ def login_codex_via_browser(email, password, mail_client=None):
 
         # 输入邮箱（避免误点 Google/Microsoft 第三方登录按钮）
         try:
-            ei = _page.locator('input[name="email"], input[id="email-input"], input[id="email"]').first
-            if ei.is_visible(timeout=5000):
-                ei.fill(email)
+            if _fill_email_if_visible(_page, email, timeout=5000):
                 time.sleep(0.5)
-                submit = ei.locator("xpath=ancestor::form//button[contains(text(),'Continue') or contains(text(),'继续') or @type='submit']").first
-                if submit.is_visible(timeout=3000):
-                    submit.click()
-                else:
-                    _page.locator('button:has-text("Continue"), button:has-text("继续")').last.click()
+                _click_primary_auth_button(_page)
+                try:
+                    _page.locator('input[name="password"], input[type="password"]').first.wait_for(timeout=10000)
+                except Exception:
+                    pass
                 time.sleep(3)
         except Exception:
             pass
 
         # 输入密码
-        try:
-            pi = _page.locator('input[type="password"]').first
-            if pi.is_visible(timeout=5000):
-                pi.fill(password)
-                time.sleep(0.5)
-                submit = pi.locator("xpath=ancestor::form//button[contains(text(),'Continue') or contains(text(),'继续') or @type='submit']").first
-                if submit.is_visible(timeout=3000):
-                    submit.click()
-                else:
-                    _page.locator('button:has-text("Continue"), button:has-text("继续")').last.click()
-                time.sleep(8)
-        except Exception:
-            pass
+        if _fill_password_if_visible(_page, password, timeout=8000):
+            time.sleep(8)
 
         # 可能需要邮箱验证码
         try:
@@ -179,9 +316,9 @@ def login_codex_via_browser(email, password, mail_client=None):
                         break
                     time.sleep(3)
                 if otp:
-                    ci.fill(otp)
+                    _fill_input_verified(ci, otp)
                     time.sleep(0.5)
-                    _page.locator('button[type="submit"]').first.click()
+                    _click_primary_auth_button(_page, labels=("Continue", "继续", "Verify", "Submit"))
                     time.sleep(5)
         except Exception:
             pass
@@ -251,38 +388,24 @@ def login_codex_via_browser(email, password, mail_client=None):
         _screenshot(page, "codex_01_auth_page.png")
 
         # 输入邮箱（注意避免点到 Google/Microsoft/Apple 第三方登录按钮）
-        email_input = page.locator('input[name="email"], input[id="email-input"], input[id="email"]').first
         try:
-            if email_input.is_visible(timeout=5000):
-                email_input.fill(email)
+            if _fill_email_if_visible(page, email, timeout=5000):
                 time.sleep(0.5)
-                # 点邮箱表单的 Continue，用邮箱输入框的父 form 内定位避免误点第三方登录
-                submit_btn = email_input.locator("xpath=ancestor::form//button[contains(text(),'Continue') or @type='submit']").first
-                if submit_btn.is_visible(timeout=3000):
-                    submit_btn.click()
-                else:
-                    # fallback: 页面上最后一个 Continue 按钮（第三方登录按钮在上方）
-                    page.locator('button:has-text("Continue")').last.click()
+                _click_primary_auth_button(page)
+                try:
+                    page.locator('input[name="password"], input[type="password"]').first.wait_for(timeout=10000)
+                except Exception:
+                    pass
                 time.sleep(3)
                 _screenshot(page, "codex_02_after_email.png")
         except Exception:
             _screenshot(page, "codex_02_no_email.png")
 
         # 输入密码
-        pwd_input = page.locator('input[name="password"], input[type="password"]').first
-        try:
-            if pwd_input.is_visible(timeout=5000):
-                pwd_input.fill(password)
-                time.sleep(0.5)
-                # 同样用父 form 内定位
-                submit_btn = pwd_input.locator("xpath=ancestor::form//button[contains(text(),'Continue') or contains(text(),'Log in') or @type='submit']").first
-                if submit_btn.is_visible(timeout=3000):
-                    submit_btn.click()
-                else:
-                    page.locator('button:has-text("Continue"), button:has-text("Log in")').last.click()
-                time.sleep(5)
-                _screenshot(page, "codex_03_after_password.png")
-        except Exception:
+        if _fill_password_if_visible(page, password, timeout=8000):
+            time.sleep(5)
+            _screenshot(page, "codex_03_after_password.png")
+        else:
             _screenshot(page, "codex_03_no_password.png")
 
         # 可能需要邮箱登录验证码
@@ -317,9 +440,9 @@ def login_codex_via_browser(email, password, mail_client=None):
 
             if otp_code:
                 logger.info("[Codex] 获取到验证码: %s", otp_code)
-                code_input.fill(otp_code)
+                _fill_input_verified(code_input, otp_code)
                 time.sleep(0.5)
-                page.locator('button:has-text("Continue"), button:has-text("继续"), button[type="submit"]').first.click()
+                _click_primary_auth_button(page, labels=("Continue", "继续", "Verify", "Submit"))
                 time.sleep(5)
                 _screenshot(page, "codex_03c_after_otp.png")
             else:
@@ -331,37 +454,7 @@ def login_codex_via_browser(email, password, mail_client=None):
         if "about-you" in page.url:
             logger.info("[Codex] 检测到 about-you 页面，填写个人信息...")
             try:
-                name_input = page.locator('input[name="name"]').first
-                if name_input.is_visible(timeout=3000):
-                    name_input.fill("User")
-
-                # 自适应：生日日期（spinbutton）或年龄（普通 input）
-                spinbuttons = page.locator('[role="spinbutton"]').all()
-                if len(spinbuttons) >= 3:
-                    # 类型 A：React Aria DateField
-                    try:
-                        page.locator('text=生日日期').click()
-                        time.sleep(0.5)
-                    except Exception:
-                        pass
-                    for sb, val in zip(spinbuttons[:3], ["1995", "06", "15"]):
-                        sb.click(force=True)
-                        time.sleep(0.2)
-                        page.keyboard.type(val, delay=80)
-                        time.sleep(0.3)
-                    logger.info("[Codex] 填入生日: 1995/06/15 (spinbutton)")
-                else:
-                    # 类型 B：普通年龄数字输入框
-                    age_input = page.locator('input[name="age"], input[placeholder*="年龄"]').first
-                    try:
-                        if age_input.is_visible(timeout=3000):
-                            age_input.fill("25")
-                            logger.info("[Codex] 填入年龄: 25")
-                    except Exception:
-                        logger.warning("[Codex] 未找到年龄/生日输入框")
-
-                time.sleep(0.5)
-                page.locator('button:has-text("继续"), button:has-text("Continue"), button:has-text("完成帐户创建"), button[type="submit"]').first.click()
+                _fill_about_you(page, "[Codex]")
                 time.sleep(5)
                 _screenshot(page, "codex_03d_after_aboutyou.png")
                 logger.info("[Codex] about-you 完成，当前 URL: %s", page.url)
@@ -374,6 +467,11 @@ def login_codex_via_browser(email, password, mail_client=None):
                 break
 
             _screenshot(page, f"codex_04_step{step+1}_before.png")
+
+            if _fill_password_if_visible(page, password, timeout=1000):
+                logger.info("[Codex] 已补填密码 (step %d)", step + 1)
+                time.sleep(5)
+                continue
 
             # 在任何页面中，如果有 workspace/组织选择，先选 Team
             try:
@@ -430,9 +528,9 @@ def login_codex_via_browser(email, password, mail_client=None):
                             break
                         time.sleep(3)
                     if otp:
-                        otp_input.fill(otp)
+                        _fill_input_verified(otp_input, otp)
                         time.sleep(0.5)
-                        page.locator('button[type="submit"], button:has-text("Continue"), button:has-text("继续")').first.click()
+                        _click_primary_auth_button(page, labels=("Continue", "继续", "Verify", "Submit"))
                         time.sleep(5)
                         logger.info("[Codex] 已输入验证码: %s", otp)
                         continue  # 重新循环检查下一个页面
@@ -440,8 +538,13 @@ def login_codex_via_browser(email, password, mail_client=None):
                 pass
 
             try:
-                consent_btn = page.locator('button:has-text("继续"), button:has-text("Continue"), button:has-text("Allow")').first
-                if consent_btn.is_visible(timeout=5000):
+                consent_btn = None
+                for label in ("继续", "Continue", "Allow"):
+                    btn = page.get_by_role("button", name=label, exact=True).first
+                    if btn.is_visible(timeout=2000):
+                        consent_btn = btn
+                        break
+                if consent_btn:
                     logger.info("[Codex] 点击同意/继续按钮 (step %d)...", step + 1)
                     consent_btn.click()
                     time.sleep(5)

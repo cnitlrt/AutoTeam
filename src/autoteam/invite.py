@@ -23,6 +23,7 @@ import time
 import re
 from autoteam.cloudmail import CloudMailClient
 from autoteam.chatgpt_api import ChatGPTTeamAPI
+from autoteam.codex_auth import _click_primary_auth_button, _fill_input_verified, _fill_about_you
 from playwright.sync_api import sync_playwright
 
 logger = logging.getLogger(__name__)
@@ -106,16 +107,17 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
     ], "邮箱输入框")
 
     if email_input:
-        email_input.fill(email)
+        if not _fill_input_verified(email_input, email):
+            logger.warning("[注册] 邮箱输入未生效，当前值: %s", email_input.input_value())
         time.sleep(1)
 
         # 点击 Continue
-        find_and_click(page, [
-            'button:has-text("Continue")',
-            'button:has-text("继续")',
-            'button[type="submit"]',
-        ], "继续按钮")
-        time.sleep(5)
+        _click_primary_auth_button(page)
+        try:
+            page.locator('input[type="password"]').first.wait_for(state="visible", timeout=12000)
+        except Exception:
+            pass
+        time.sleep(1)
         screenshot(page, "reg_03_after_email.png")
     else:
         logger.info("[注册] 未找到邮箱输入框，可能页面已自动填入")
@@ -133,14 +135,10 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
             import uuid
             password = f"Tmp_{uuid.uuid4().hex[:12]}!"
         logger.info("[注册] 设置密码: %s", password)
-        pwd_input.fill(password)
+        _fill_input_verified(pwd_input, password)
         time.sleep(1)
 
-        find_and_click(page, [
-            'button:has-text("Continue")',
-            'button:has-text("继续")',
-            'button[type="submit"]',
-        ], "继续按钮")
+        _click_primary_auth_button(page)
         time.sleep(5)
         screenshot(page, "reg_04_after_password.png")
 
@@ -200,7 +198,7 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
             'input[inputmode="numeric"]',
         ], "验证码输入框")
         if code_input:
-            code_input.fill(verification_code)
+            _fill_input_verified(code_input, verification_code)
         else:
             logger.warning("[注册] 未找到验证码输入框")
             screenshot(page, "reg_05_no_code_input.png")
@@ -209,68 +207,15 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
     time.sleep(1)
 
     # 点击确认
-    find_and_click(page, [
-        'button:has-text("Continue")',
-        'button:has-text("Verify")',
-        'button:has-text("Submit")',
-        'button[type="submit"]',
-    ], "确认按钮")
+    _click_primary_auth_button(page, labels=("Continue", "继续", "Verify", "Submit"))
 
     time.sleep(8)
     screenshot(page, "reg_06_after_code.png")
     logger.info("[注册] 当前 URL: %s", page.url)
 
-    # 填写个人信息（全名 + 生日/年龄）
-    name_input = find_visible(page, [
-        'input[name="name"]',
-        'input[placeholder*="name" i]',
-        'input[id="name"]',
-        'input[placeholder*="全名" i]',
-    ], "名字输入框", timeout=5000)
-
-    if name_input:
-        name_input.fill("User")
-        time.sleep(0.5)
-
-    # 自适应：生日日期（spinbutton）或年龄（普通 input）
-    filled_age = False
-    spinbuttons = page.locator('[role="spinbutton"]').all()
-    if len(spinbuttons) >= 3:
-        # 类型 A：React Aria DateField（年/月/日 spinbutton）
-        try:
-            page.locator('text=生日日期').click()
-            time.sleep(0.5)
-        except Exception:
-            pass
-        for sb, val in zip(spinbuttons[:3], ["1995", "06", "15"]):
-            sb.click(force=True)
-            time.sleep(0.2)
-            page.keyboard.type(val, delay=80)
-            time.sleep(0.3)
-        logger.info("[注册] 填入生日: 1995/06/15 (spinbutton)")
-        filled_age = True
-    else:
-        # 类型 B：普通年龄数字输入框
-        age_input = find_visible(page, [
-            'input[name="age"]',
-            'input[id="age"]',
-            'input[placeholder*="age" i]',
-            'input[placeholder*="年龄" i]',
-            'input[type="number"]',
-        ], "年龄输入框", timeout=3000)
-        if age_input:
-            age_input.fill("25")
-            logger.info("[注册] 填入年龄: 25")
-            filled_age = True
-
-    if name_input or filled_age:
-        find_and_click(page, [
-            'button:has-text("完成帐户创建")',
-            'button:has-text("Complete")',
-            'button:has-text("Continue")',
-            'button:has-text("Agree")',
-            'button[type="submit"]',
-        ], "完成按钮")
+    # 填写个人信息（全名 + 年龄）
+    if "about-you" in page.url:
+        _fill_about_you(page, "[注册]")
         time.sleep(8)
         screenshot(page, "reg_07_after_profile.png")
 

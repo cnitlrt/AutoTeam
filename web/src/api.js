@@ -20,6 +20,7 @@ export const api = {
   getAccounts: () => request('GET', '/accounts'),
   getActiveAccounts: () => request('GET', '/accounts/active'),
   getStandbyAccounts: () => request('GET', '/accounts/standby'),
+  deleteAccount: (email) => request('DELETE', `/accounts/${encodeURIComponent(email)}`),
   getCpaFiles: () => request('GET', '/cpa/files'),
 
   postSync: () => request('POST', '/sync'),

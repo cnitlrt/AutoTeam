@@ -19,7 +19,7 @@
     </header>
 
     <!-- Dashboard -->
-    <Dashboard :status="status" :loading="loading" />
+    <Dashboard :status="status" :loading="loading" @refresh="refresh" />
 
     <!-- Task Panel -->
     <TaskPanel :running-task="runningTask" @task-started="onTaskStarted" @refresh="refresh" />

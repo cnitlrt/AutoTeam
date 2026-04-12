@@ -568,6 +568,7 @@ def create_account_direct(mail_client):
     流程：创建邮箱 → 注册 ChatGPT → 自动加入 workspace → Codex 登录
     """
     from autoteam.invite import register_with_invite, screenshot
+    from autoteam.codex_auth import _click_primary_auth_button, _fill_input_verified, _fill_about_you
     from playwright.sync_api import sync_playwright
     import uuid
 
@@ -621,11 +622,23 @@ def create_account_direct(mail_client):
         logger.info("[直接注册] 输入邮箱: %s", email)
         email_input = page.locator('input[name="email"], input[type="email"]').first
         try:
-            if email_input.is_visible(timeout=5000):
-                email_input.fill(email)
-                time.sleep(0.5)
-                page.locator('button:has-text("Continue"), button:has-text("继续"), button[type="submit"]').first.click()
-                time.sleep(3)
+            email_input.wait_for(state="visible", timeout=15000)
+            email_filled = False
+            for _ in range(3):
+                if _fill_input_verified(email_input, email, attempts=1):
+                    email_filled = True
+                    break
+                time.sleep(1)
+
+            if email_filled:
+                _click_primary_auth_button(page)
+                try:
+                    page.locator('input[type="password"]').first.wait_for(state="visible", timeout=12000)
+                except Exception:
+                    pass
+                time.sleep(1)
+            else:
+                logger.warning("[直接注册] 邮箱输入未生效，当前值: %s", email_input.input_value())
         except Exception:
             pass
 
@@ -636,9 +649,9 @@ def create_account_direct(mail_client):
         try:
             if pwd_input.is_visible(timeout=5000):
                 logger.info("[直接注册] 设置密码")
-                pwd_input.fill(password)
+                _fill_input_verified(pwd_input, password)
                 time.sleep(0.5)
-                page.locator('button:has-text("Continue"), button:has-text("继续"), button[type="submit"]').first.click()
+                _click_primary_auth_button(page)
                 time.sleep(5)
         except Exception:
             pass
@@ -675,9 +688,9 @@ def create_account_direct(mail_client):
 
             if verification_code:
                 logger.info("[直接注册] 输入验证码: %s", verification_code)
-                code_input.fill(verification_code)
+                _fill_input_verified(code_input, verification_code)
                 time.sleep(0.5)
-                page.locator('button:has-text("Continue"), button:has-text("继续"), button[type="submit"]').first.click()
+                _click_primary_auth_button(page, labels=("Continue", "继续", "Verify", "Submit"))
                 time.sleep(8)
             else:
                 logger.error("[直接注册] 未收到验证码")
@@ -687,40 +700,13 @@ def create_account_direct(mail_client):
         screenshot(page, "direct_05_after_code.png")
         logger.info("[直接注册] 当前 URL: %s", page.url)
 
-        # 填写个人信息（全名 + 年龄/生日）
-        name_input = page.locator('input[name="name"]').first
+        # 填写个人信息（全名 + 年龄）
         try:
-            if name_input.is_visible(timeout=5000):
-                name_input.fill("User")
-                time.sleep(0.5)
-
-                # 自适应年龄/生日
-                spinbuttons = page.locator('[role="spinbutton"]').all()
-                if len(spinbuttons) >= 3:
-                    try:
-                        page.locator('text=生日日期').click()
-                        time.sleep(0.5)
-                    except Exception:
-                        pass
-                    for sb, val in zip(spinbuttons[:3], ["1995", "06", "15"]):
-                        sb.click(force=True)
-                        time.sleep(0.2)
-                        page.keyboard.type(val, delay=80)
-                        time.sleep(0.3)
-                    logger.info("[直接注册] 填入生日: 1995/06/15")
-                else:
-                    age_input = page.locator('input[name="age"]').first
-                    try:
-                        if age_input.is_visible(timeout=3000):
-                            age_input.fill("25")
-                            logger.info("[直接注册] 填入年龄: 25")
-                    except Exception:
-                        pass
-
-                page.locator('button:has-text("完成帐户创建"), button:has-text("Continue"), button:has-text("继续"), button[type="submit"]').first.click()
+            if "about-you" in page.url:
+                _fill_about_you(page, "[直接注册]")
                 time.sleep(8)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[直接注册] about-you 处理异常: %s", e)
 
         screenshot(page, "direct_06_after_profile.png")
         logger.info("[直接注册] 当前 URL: %s", page.url)
@@ -788,6 +774,7 @@ def reinvite_account(chatgpt_api, mail_client, acc):
     登录后自动回到 workspace，然后刷新 Codex token。
     """
     from autoteam.invite import screenshot
+    from autoteam.codex_auth import _click_primary_auth_button, _fill_email_if_visible, _fill_input_verified
     from playwright.sync_api import sync_playwright
 
     email = acc["email"]
@@ -831,13 +818,15 @@ def reinvite_account(chatgpt_api, mail_client, acc):
             pass
 
         # 输入邮箱
-        email_input = page.locator('input[name="email"], input[type="email"]').first
         try:
-            if email_input.is_visible(timeout=5000):
-                email_input.fill(email)
+            if _fill_email_if_visible(page, email, timeout=5000):
                 time.sleep(0.5)
-                page.locator('button:has-text("Continue"), button:has-text("继续"), button[type="submit"]').first.click()
-                time.sleep(3)
+                _click_primary_auth_button(page)
+                try:
+                    page.locator('input[type="password"]').first.wait_for(state="visible", timeout=12000)
+                except Exception:
+                    pass
+                time.sleep(1)
         except Exception:
             pass
 
@@ -845,9 +834,9 @@ def reinvite_account(chatgpt_api, mail_client, acc):
         pwd_input = page.locator('input[type="password"]').first
         try:
             if pwd_input.is_visible(timeout=5000):
-                pwd_input.fill(password)
+                _fill_input_verified(pwd_input, password)
                 time.sleep(0.5)
-                page.locator('button:has-text("Continue"), button:has-text("继续"), button[type="submit"]').first.click()
+                _click_primary_auth_button(page)
                 time.sleep(8)
         except Exception:
             pass
@@ -882,9 +871,9 @@ def reinvite_account(chatgpt_api, mail_client, acc):
                 time.sleep(3)
             if otp:
                 logger.info("[轮转] 输入验证码: %s", otp)
-                code_input.fill(otp)
+                _fill_input_verified(code_input, otp)
                 time.sleep(0.5)
-                page.locator('button:has-text("Continue"), button:has-text("继续"), button[type="submit"]').first.click()
+                _click_primary_auth_button(page, labels=("Continue", "继续", "Verify", "Submit"))
                 time.sleep(5)
 
         screenshot(page, "reinvite_final.png")
@@ -987,8 +976,10 @@ def cmd_rotate(target_seats=5):
         if not chatgpt or not chatgpt.browser:
             ensure_chatgpt()
         api_count = get_team_member_count(chatgpt)
+        if api_count < 0:
+            raise RuntimeError("获取 Team 成员数失败，已停止轮转，避免误判空缺后继续创建新账号")
         # API 有缓存延迟，移出后可能返回旧数据，手动修正
-        current_count = max(0, api_count - removed_count) if api_count >= 0 else 0
+        current_count = max(0, api_count - removed_count)
         vacancies = TARGET - current_count
 
         if vacancies <= 0:
@@ -1121,8 +1112,10 @@ def cmd_add():
 def get_team_member_count(chatgpt_api):
     """获取当前 Team 成员数"""
     path = f"/backend-api/accounts/{CHATGPT_ACCOUNT_ID}/users"
+    logger.info("[填充] 正在获取 Team 成员数...")
     result = chatgpt_api._api_fetch("GET", path)
     if result["status"] != 200:
+        logger.warning("[填充] 获取成员列表失败: HTTP %s %s", result.get("status"), str(result.get("body", ""))[:120])
         return -1
     data = json.loads(result["body"])
     members = data.get("items", data.get("users", data.get("members", [])))
@@ -1131,8 +1124,10 @@ def get_team_member_count(chatgpt_api):
 
 def cmd_fill(target=5):
     """检测 Team 成员数，不足 target 则自动添加新账号补满"""
+    logger.info("[填充] 启动 ChatGPT 管理浏览器...")
     chatgpt = ChatGPTTeamAPI()
     chatgpt.start()
+    logger.info("[填充] 登录 CloudMail...")
     mail_client = CloudMailClient()
     mail_client.login()
 
@@ -1151,8 +1146,12 @@ def cmd_fill(target=5):
 
         logger.info("[填充] 需要添加 %d 个账号", need)
 
-        for i in range(need):
-            logger.info("[填充] 添加第 %d/%d 个账号...", i + 1, need)
+        attempts = 0
+        max_attempts = int(os.environ.get("FILL_MAX_ATTEMPTS", str(need)))
+        while current < target and attempts < max_attempts:
+            attempts += 1
+            before_count = current
+            logger.info("[填充] 添加尝试 %d/%d（当前 %d/%d）...", attempts, max_attempts, current, target)
 
             # 优先复用 standby 中额度已恢复的旧账号
             reusable = get_next_reusable_account()
@@ -1168,18 +1167,32 @@ def cmd_fill(target=5):
                 logger.info("[填充] 创建新账号...")
                 if not chatgpt.browser:
                     chatgpt.start()
-                create_new_account(chatgpt, mail_client)
+                result = create_new_account(chatgpt, mail_client)
+                if not result:
+                    logger.warning("[填充] 本次创建未完成，将继续尝试补满")
 
             # 验证成员数
             if not chatgpt.browser:
                 chatgpt.start()
             new_count = get_team_member_count(chatgpt)
             if new_count >= 0:
+                current = new_count
                 logger.info("[填充] 当前成员数: %d/%d", new_count, target)
+                if new_count <= before_count:
+                    logger.warning("[填充] 成员数未增加（仍为 %d/%d），继续下一次尝试", new_count, target)
+            else:
+                logger.warning("[填充] 本次无法确认成员数，继续下一次尝试")
 
-        logger.info("[填充] 填充完成")
-        sync_to_cpa()
-        cmd_status()
+        if current < target:
+            message = f"未能补满：当前 {current}/{target}，已尝试 {attempts} 次"
+            logger.warning("[填充] %s", message)
+            sync_to_cpa()
+            cmd_status()
+            raise RuntimeError(message)
+        else:
+            logger.info("[填充] 填充完成：当前 %d/%d", current, target)
+            sync_to_cpa()
+            cmd_status()
 
     finally:
         if chatgpt.browser:

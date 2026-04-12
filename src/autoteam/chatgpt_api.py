@@ -3,10 +3,12 @@ import autoteam.display  # noqa: F401
 
 import json
 import logging
+import os
 import time
 import uuid
 from pathlib import Path
-from playwright.sync_api import sync_playwright
+import requests
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from autoteam.config import CHATGPT_ACCOUNT_ID
 
@@ -15,6 +17,8 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 BASE_DIR = PROJECT_ROOT
 SCREENSHOT_DIR = PROJECT_ROOT / "screenshots"
+CHATGPT_HOME_TIMEOUT_MS = int(os.environ.get("CHATGPT_HOME_TIMEOUT_MS", "25000"))
+CHATGPT_ACTION_TIMEOUT_MS = int(os.environ.get("CHATGPT_ACTION_TIMEOUT_MS", "20000"))
 
 
 class ChatGPTTeamAPI:
@@ -28,6 +32,124 @@ class ChatGPTTeamAPI:
         self.access_token = None
         self.account_id = CHATGPT_ACCOUNT_ID
         self.oai_device_id = str(uuid.uuid4())
+        self.session_token = None
+
+    def _build_session_cookies(self, session_token):
+        """构建浏览器 cookie。session 文件存完整 token，这里按 NextAuth 规则分片。"""
+        cookies = []
+        if len(session_token) > 3800:
+            cookies.extend([
+                {
+                    "name": "__Secure-next-auth.session-token.0",
+                    "value": session_token[:3800],
+                    "domain": "chatgpt.com",
+                    "path": "/",
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "Lax",
+                },
+                {
+                    "name": "__Secure-next-auth.session-token.1",
+                    "value": session_token[3800:],
+                    "domain": "chatgpt.com",
+                    "path": "/",
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "Lax",
+                },
+            ])
+        else:
+            cookies.append({
+                "name": "__Secure-next-auth.session-token",
+                "value": session_token,
+                "domain": "chatgpt.com",
+                "path": "/",
+                "httpOnly": True,
+                "secure": True,
+                "sameSite": "Lax",
+            })
+
+        cookies.extend([
+            {
+                "name": "_account",
+                "value": self.account_id,
+                "domain": "chatgpt.com",
+                "path": "/",
+                "secure": True,
+                "sameSite": "Lax",
+            },
+            {
+                "name": "oai-did",
+                "value": self.oai_device_id,
+                "domain": "chatgpt.com",
+                "path": "/",
+                "secure": True,
+                "sameSite": "Lax",
+            },
+        ])
+        return cookies
+
+    def _requests_cookies(self):
+        """requests 用的 cookie dict。"""
+        if not self.session_token:
+            return {}
+        if len(self.session_token) > 3800:
+            cookies = {
+                "__Secure-next-auth.session-token.0": self.session_token[:3800],
+                "__Secure-next-auth.session-token.1": self.session_token[3800:],
+            }
+        else:
+            cookies = {"__Secure-next-auth.session-token": self.session_token}
+        cookies["_account"] = self.account_id
+        cookies["oai-did"] = self.oai_device_id
+        return cookies
+
+    def _debug_screenshot(self, label):
+        """保存当前页面状态，避免排查时只能看最后一行日志。"""
+        if not self.page:
+            return
+        try:
+            path = SCREENSHOT_DIR / f"chatgpt-{label}-{int(time.time())}.png"
+            self.page.screenshot(path=str(path), full_page=True, timeout=5000)
+            logger.warning("[ChatGPT] 已保存诊断截图: %s", path)
+        except Exception as e:
+            logger.debug("[ChatGPT] 保存诊断截图失败: %s", e)
+
+    def _open_chatgpt_home(self):
+        """打开 ChatGPT 首页，但任何页面加载问题都不能无限阻塞 fill。"""
+        last_error = None
+        for attempt in range(1, 3):
+            logger.info("[ChatGPT] 访问 chatgpt.com 过 Cloudflare... (尝试 %d/2)", attempt)
+            try:
+                self.page.goto(
+                    "https://chatgpt.com/",
+                    wait_until="commit",
+                    timeout=CHATGPT_HOME_TIMEOUT_MS,
+                )
+                try:
+                    self.page.wait_for_load_state("domcontentloaded", timeout=10000)
+                except PlaywrightTimeoutError:
+                    logger.warning("[ChatGPT] DOM 加载超时，继续检查当前页面")
+
+                logger.info("[ChatGPT] 当前 URL: %s", self.page.url)
+                for i in range(3):
+                    html = self.page.content()[:1000].lower()
+                    if "verify you are human" not in html and "challenge" not in self.page.url:
+                        return
+                    logger.warning("[ChatGPT] Cloudflare 验证仍在页面上，等待 %ds", (i + 1) * 5)
+                    time.sleep(5)
+                self._debug_screenshot("cloudflare")
+                return
+            except PlaywrightTimeoutError as e:
+                last_error = e
+                logger.warning("[ChatGPT] 打开 chatgpt.com 超时: %ss", CHATGPT_HOME_TIMEOUT_MS // 1000)
+                self._debug_screenshot("home-timeout")
+            except Exception as e:
+                last_error = e
+                logger.warning("[ChatGPT] 打开 chatgpt.com 失败: %s", e)
+                self._debug_screenshot("home-error")
+
+        raise RuntimeError(f"ChatGPT 首页连续打开失败: {last_error}")
 
     def start(self):
         """启动浏览器，注入 cookies，获取 access token"""
@@ -37,93 +159,33 @@ class ChatGPTTeamAPI:
         session_file = BASE_DIR / "session"
         if not session_file.exists():
             raise FileNotFoundError("请先把 ChatGPT session token 写入 ./session 文件")
-        session_token = session_file.read_text().strip()
+        self.session_token = session_file.read_text().strip()
 
         self.playwright = sync_playwright().start()
         self.browser = self.playwright.chromium.launch(
             headless=False,
             args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            timeout=30000,
         )
         self.context = self.browser.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
         )
+        self.context.set_default_timeout(CHATGPT_ACTION_TIMEOUT_MS)
+        self.context.set_default_navigation_timeout(CHATGPT_HOME_TIMEOUT_MS)
         self.page = self.context.new_page()
 
-        # 先访问 chatgpt.com 过 Cloudflare
-        logger.info("[ChatGPT] 访问 chatgpt.com 过 Cloudflare...")
-        self.page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
-        time.sleep(5)
-
-        for i in range(12):
-            html = self.page.content()[:1000].lower()
-            if "verify you are human" not in html and "challenge" not in self.page.url:
-                break
-            logger.info("[ChatGPT] 等待 Cloudflare... (%ds)", i * 5)
-            time.sleep(5)
-
-        # 注入 session cookie（分片格式）
-        # 检测 token 长度，超过 3800 就分片
-        if len(session_token) > 3800:
-            part0 = session_token[:3800]
-            part1 = session_token[3800:]
-            cookies = [
-                {
-                    "name": "__Secure-next-auth.session-token.0",
-                    "value": part0,
-                    "domain": "chatgpt.com",
-                    "path": "/",
-                    "httpOnly": True,
-                    "secure": True,
-                    "sameSite": "Lax",
-                },
-                {
-                    "name": "__Secure-next-auth.session-token.1",
-                    "value": part1,
-                    "domain": "chatgpt.com",
-                    "path": "/",
-                    "httpOnly": True,
-                    "secure": True,
-                    "sameSite": "Lax",
-                },
-            ]
-        else:
-            cookies = [{
-                "name": "__Secure-next-auth.session-token",
-                "value": session_token,
-                "domain": "chatgpt.com",
-                "path": "/",
-                "httpOnly": True,
-                "secure": True,
-                "sameSite": "Lax",
-            }]
-
-        # 加上 account cookie
-        cookies.append({
-            "name": "_account",
-            "value": self.account_id,
-            "domain": "chatgpt.com",
-            "path": "/",
-            "secure": True,
-            "sameSite": "Lax",
-        })
-        cookies.append({
-            "name": "oai-did",
-            "value": self.oai_device_id,
-            "domain": "chatgpt.com",
-            "path": "/",
-            "secure": True,
-            "sameSite": "Lax",
-        })
-
-        self.context.add_cookies(cookies)
+        self.context.add_cookies(self._build_session_cookies(self.session_token))
         logger.info("[ChatGPT] 已注入 session cookies")
+        self._open_chatgpt_home()
 
         # 获取 access token
         self._fetch_access_token()
 
-        # 自动检测 account_id 和 workspace_name（如果未配置）
-        self._auto_detect_workspace()
+        # workspace 名称只用于 OAuth 页面选择辅助，不能阻塞管理 API 启动。
+        # 需要自动检测时可设置 AUTO_DETECT_WORKSPACE=1。
+        if os.environ.get("AUTO_DETECT_WORKSPACE") == "1":
+            self._auto_detect_workspace()
 
     def _auto_detect_workspace(self):
         """自动获取 workspace 名称（需要 CHATGPT_ACCOUNT_ID 已配置）"""
@@ -136,16 +198,21 @@ class ChatGPTTeamAPI:
             logger.warning("[ChatGPT] 请在 .env 中配置 CHATGPT_ACCOUNT_ID")
             return
 
-        # 用 account_id 调 API 获取 workspace 信息
-        result = self._api_fetch("GET", f"/backend-api/accounts/{self.account_id}/invites")
-        # invites 接口不返回名称，换用 settings
+        # 用 settings 接口获取 workspace 名称。
         result = self.page.evaluate('''async (accountId) => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 30000);
             try {
                 const resp = await fetch("/backend-api/accounts/" + accountId + "/settings", {
-                    headers: { "chatgpt-account-id": accountId }
+                    headers: { "chatgpt-account-id": accountId },
+                    signal: controller.signal
                 });
                 return await resp.json();
-            } catch(e) { return null; }
+            } catch(e) {
+                return null;
+            } finally {
+                clearTimeout(timer);
+            }
         }''', self.account_id)
 
         if result and result.get("workspace_name"):
@@ -184,14 +251,38 @@ class ChatGPTTeamAPI:
 
     def _fetch_access_token(self):
         """通过浏览器 fetch 获取 access token"""
+        try:
+            resp = requests.get(
+                "https://chatgpt.com/api/auth/session",
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+                },
+                cookies=self._requests_cookies(),
+                timeout=15,
+            )
+            if resp.ok:
+                data = resp.json()
+                if data.get("accessToken"):
+                    self.access_token = data["accessToken"]
+                    logger.info("[ChatGPT] 已获取 access token")
+                    return
+            logger.warning("[ChatGPT] 直接获取 access token 未成功: HTTP %s", resp.status_code)
+        except Exception as e:
+            logger.warning("[ChatGPT] 直接获取 access token 失败: %s", e)
+
         result = self.page.evaluate('''async () => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 10000);
             try {
-                const resp = await fetch("/api/auth/session");
+                const resp = await fetch("/api/auth/session", { signal: controller.signal });
                 const data = await resp.json();
                 return { ok: true, data: data };
             } catch(e) {
                 // session 接口可能不返回 token，试 /backend-api/me
                 return { ok: false, error: e.message };
+            } finally {
+                clearTimeout(timer);
             }
         }''')
 
@@ -203,15 +294,20 @@ class ChatGPTTeamAPI:
         # 尝试通过 sentinel chat requirements 获取 token
         # 先试试 /backend-api/sentinel/chat-requirements
         result2 = self.page.evaluate('''async () => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 10000);
             try {
                 const resp = await fetch("/backend-api/sentinel/chat-requirements", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({})
+                    body: JSON.stringify({}),
+                    signal: controller.signal
                 });
                 return { status: resp.status, text: await resp.text() };
             } catch(e) {
                 return { error: e.message };
+            } finally {
+                clearTimeout(timer);
             }
         }''')
 
@@ -224,8 +320,13 @@ class ChatGPTTeamAPI:
 
         # 最后手段：导航到 chatgpt.com 让前端 JS 获取 token，然后从 localStorage 读取
         logger.info("[ChatGPT] 尝试通过页面获取 access token...")
-        self.page.goto("https://chatgpt.com/", wait_until="networkidle", timeout=60000)
-        time.sleep(10)
+        try:
+            self.page.goto("https://chatgpt.com/", wait_until="commit", timeout=CHATGPT_HOME_TIMEOUT_MS)
+            self.page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.warning("[ChatGPT] token 兜底页面加载超时，继续读取 localStorage")
+            self._debug_screenshot("token-page-timeout")
+        time.sleep(3)
 
         token = self.page.evaluate('''() => {
             // 尝试多种方式
@@ -257,8 +358,40 @@ class ChatGPTTeamAPI:
         else:
             logger.warning("[ChatGPT] 未能获取 access token，将尝试无 token 调用")
 
-    def _api_fetch(self, method, path, body=None):
-        """在浏览器内用 fetch 调用 ChatGPT API"""
+    def _api_fetch(self, method, path, body=None, timeout_ms=30000):
+        """调用 ChatGPT API。默认用 requests，避免浏览器 page.evaluate 卡死。"""
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "Origin": "https://chatgpt.com",
+            "Referer": "https://chatgpt.com/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+            "chatgpt-account-id": self.account_id,
+            "oai-device-id": self.oai_device_id,
+            "oai-language": "en-US",
+        }
+        if self.access_token:
+            headers["authorization"] = f"Bearer {self.access_token}"
+
+        url = f"https://chatgpt.com{path}"
+        logger.debug("[ChatGPT] API %s %s", method, path)
+
+        if os.environ.get("CHATGPT_API_FETCH_MODE") != "browser":
+            try:
+                resp = requests.request(
+                    method,
+                    url,
+                    headers=headers,
+                    cookies=self._requests_cookies(),
+                    json=body if body else None,
+                    timeout=max(1, timeout_ms / 1000),
+                )
+                return {"status": resp.status_code, "body": resp.text}
+            except Exception as e:
+                logger.warning("[ChatGPT] API 请求失败: %s %s -> %s", method, path, e)
+                return {"status": 0, "body": str(e)}
+
+        # 调试用：保留浏览器内 fetch 模式，但不作为默认路径。
         headers_js = {
             "Content-Type": "application/json",
             "chatgpt-account-id": self.account_id,
@@ -268,21 +401,25 @@ class ChatGPTTeamAPI:
         if self.access_token:
             headers_js["authorization"] = f"Bearer {self.access_token}"
 
-        js_code = '''async ([method, url, headers, body]) => {
+        js_code = '''async ([method, url, headers, body, timeoutMs]) => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeoutMs);
             try {
-                const opts = { method, headers };
+                const opts = { method, headers, signal: controller.signal };
                 if (body) opts.body = body;
                 const resp = await fetch(url, opts);
                 const text = await resp.text();
                 return { status: resp.status, body: text };
             } catch(e) {
                 return { status: 0, body: e.message };
+            } finally {
+                clearTimeout(timer);
             }
         }'''
 
         result = self.page.evaluate(
             js_code,
-            [method, f"https://chatgpt.com{path}", headers_js, json.dumps(body) if body else None],
+            [method, f"https://chatgpt.com{path}", headers_js, json.dumps(body) if body else None, timeout_ms],
         )
         return result
 

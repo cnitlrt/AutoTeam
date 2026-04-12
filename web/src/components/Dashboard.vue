@@ -25,6 +25,7 @@
               <th class="px-4 py-3 font-medium text-right">周 剩余</th>
               <th class="px-4 py-3 font-medium">5h 重置</th>
               <th class="px-4 py-3 font-medium">周 重置</th>
+              <th class="px-4 py-3 font-medium text-right">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -47,6 +48,12 @@
               </td>
               <td class="px-4 py-3 text-gray-400 text-xs">{{ quotaReset(acc, 'primary') }}</td>
               <td class="px-4 py-3 text-gray-400 text-xs">{{ quotaReset(acc, 'weekly') }}</td>
+              <td class="px-4 py-3 text-right">
+                <button @click="deleteAccount(acc)" :disabled="deletingEmail === acc.email"
+                  class="px-2 py-1 text-xs rounded border border-red-500/30 text-red-400 hover:bg-red-500/10 transition disabled:opacity-50">
+                  {{ deletingEmail === acc.email ? '删除中' : '删除' }}
+                </button>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -64,12 +71,16 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
+import { api } from '../api.js'
 
 const props = defineProps({
   status: Object,
   loading: Boolean,
 })
+
+const emit = defineEmits(['refresh'])
+const deletingEmail = ref('')
 
 const cards = computed(() => {
   if (!props.status) return []
@@ -130,5 +141,18 @@ function pctColor(val) {
   if (val > 30) return 'text-green-400'
   if (val > 0) return 'text-yellow-400'
   return 'text-red-400'
+}
+
+async function deleteAccount(acc) {
+  if (!window.confirm(`删除本地账号记录？\n${acc.email}`)) return
+  deletingEmail.value = acc.email
+  try {
+    await api.deleteAccount(acc.email)
+    emit('refresh')
+  } catch (e) {
+    window.alert(e.message || '删除失败')
+  } finally {
+    deletingEmail.value = ''
+  }
 }
 </script>
