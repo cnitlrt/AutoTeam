@@ -36,7 +36,7 @@ from autoteam.codex_auth import (
     login_codex_via_browser, save_auth_file, check_codex_quota,
     refresh_access_token,
 )
-from autoteam.config import CHATGPT_ACCOUNT_ID
+from autoteam.config import CHATGPT_ACCOUNT_ID, TEAM_MAX_SEATS, TEAM_POOL_TARGET
 from autoteam.cpa_sync import sync_to_cpa
 
 logger = logging.getLogger(__name__)
@@ -948,6 +948,7 @@ def cmd_rotate(target_seats=5):
 
     logger.info("[1/5] 同步 Team 状态...")
     sync_account_states()
+    ensure_team_capacity(ensure_chatgpt(), max_seats=TEAM_MAX_SEATS, fix=True, log_prefix="[限制]")
 
     logger.info("[2/5] 检查额度...")
     exhausted = cmd_check()
@@ -970,16 +971,25 @@ def cmd_rotate(target_seats=5):
         else:
             logger.info("[3/5] 无需移出账号")
 
-        # 检查空缺
-        removed_count = len([a for a in all_exhausted if find_account(load_accounts(), a["email"])
-                             and find_account(load_accounts(), a["email"])["status"] == STATUS_STANDBY])
+        # 检查空缺：以 Team 实际成员列表为准，等待移除结果落地，避免误判。
         if not chatgpt or not chatgpt.browser:
             ensure_chatgpt()
-        api_count = get_team_member_count(chatgpt)
-        if api_count < 0:
-            raise RuntimeError("获取 Team 成员数失败，已停止轮转，避免误判空缺后继续创建新账号")
-        # API 有缓存延迟，移出后可能返回旧数据，手动修正
-        current_count = max(0, api_count - removed_count)
+        ensure_team_capacity(chatgpt, max_seats=TEAM_MAX_SEATS, fix=True, log_prefix="[限制]")
+        removed_emails = [
+            a["email"].lower() for a in all_exhausted
+            if find_account(load_accounts(), a["email"])
+            and find_account(load_accounts(), a["email"])["status"] == STATUS_STANDBY
+        ]
+        team_emails = wait_for_team_state(
+            chatgpt,
+            absent_emails=removed_emails,
+            timeout=30,
+            interval=3,
+            log_prefix="[填充]",
+        )
+        if team_emails is None:
+            raise RuntimeError("获取 Team 实际成员列表失败，或移除结果未落地，已停止轮转以避免误补")
+        current_count = len(team_emails)
         vacancies = TARGET - current_count
 
         if vacancies <= 0:
@@ -987,6 +997,46 @@ def cmd_rotate(target_seats=5):
             return
 
         logger.info("[4/5] 填补 %d 个空缺 (当前 %d/%d)...", vacancies, current_count, TARGET)
+
+        # 先扩张号池：当本地号池不足目标值时，优先创建新号
+        total_pool = len(load_accounts())
+        need_pool_growth = max(0, TEAM_POOL_TARGET - total_pool)
+        if need_pool_growth > 0:
+            grow_count = min(vacancies, need_pool_growth)
+            logger.info("[4/5] 当前号池 %d/%d，优先创建 %d 个新账号扩池...",
+                        total_pool, TEAM_POOL_TARGET, grow_count)
+            for i in range(grow_count):
+                if not chatgpt or not chatgpt.browser:
+                    ensure_chatgpt()
+                team_emails = get_team_member_emails(chatgpt, log_prefix="[填充]")
+                if team_emails is None:
+                    raise RuntimeError("扩张号池前无法确认 Team 成员列表，已停止轮转")
+                if len(team_emails) >= TARGET:
+                    logger.info("[4/5] Team 已补满 (%d/%d)，停止继续扩池", len(team_emails), TARGET)
+                    return
+                before_count = len(team_emails)
+                logger.info("[4/5] 扩池创建第 %d/%d 个...", i + 1, grow_count)
+                result_email = create_new_account(chatgpt, ensure_mail())
+                expected_emails = [result_email] if result_email else None
+                team_emails = wait_for_team_state(
+                    chatgpt,
+                    present_emails=expected_emails,
+                    min_count=before_count + 1,
+                    max_count=TARGET,
+                    timeout=60,
+                    interval=3,
+                    log_prefix="[填充]",
+                )
+                if team_emails is None:
+                    raise RuntimeError("扩池创建新号后无法确认 Team 状态，已停止轮转")
+                if len(team_emails) > TARGET:
+                    team_emails = ensure_team_capacity(chatgpt, max_seats=TARGET, fix=True, log_prefix="[限制]")
+                    raise RuntimeError(f"扩池创建新号后 Team 成员数变为 {len(team_emails)}，已自动清理回上限 {TARGET}")
+
+            vacancies -= grow_count
+            if vacancies <= 0:
+                logger.info("[4/5] 已通过扩池填满空缺")
+                return
 
         # 优先复用旧账号（先验证额度是否真的恢复了）
         filled = 0
@@ -998,6 +1048,18 @@ def cmd_rotate(target_seats=5):
                 break
             email = acc["email"]
             auth_file = acc.get("auth_file")
+
+            team_emails = get_team_member_emails(chatgpt, log_prefix="[填充]")
+            if team_emails is None:
+                raise RuntimeError("填补前无法确认 Team 成员列表，已停止轮转")
+            if len(team_emails) >= TARGET:
+                logger.info("[4/5] Team 已补满 (%d/%d)，停止继续复用", len(team_emails), TARGET)
+                return
+            if email.lower() in team_emails:
+                logger.info("[4/5] %s 已在 Team 中，更新本地状态", email)
+                update_account(email, status=STATUS_ACTIVE, last_active_at=time.time())
+                filled += 1
+                continue
 
             # 验证额度是否真的恢复了
             quota_ok = False
@@ -1060,9 +1122,23 @@ def cmd_rotate(target_seats=5):
                         continue
 
             logger.info("[4/5] 复用: %s", email)
+            before_count = len(team_emails)
             if not chatgpt or not chatgpt.browser:
                 ensure_chatgpt()
             reinvite_account(chatgpt, ensure_mail(), acc)
+            team_emails = wait_for_team_state(
+                chatgpt,
+                present_emails=[email],
+                min_count=before_count,
+                timeout=45,
+                interval=3,
+                log_prefix="[填充]",
+            )
+            if team_emails is None:
+                raise RuntimeError(f"复用 {email} 后无法确认 Team 状态，已停止轮转")
+            if len(team_emails) > TARGET:
+                team_emails = ensure_team_capacity(chatgpt, max_seats=TARGET, fix=True, log_prefix="[限制]")
+                raise RuntimeError(f"复用 {email} 后 Team 成员数变为 {len(team_emails)}，已自动清理回上限 {TARGET}")
             filled += 1
 
         if skipped:
@@ -1079,7 +1155,29 @@ def cmd_rotate(target_seats=5):
             logger.info("[5/5] 创建第 %d/%d 个...", i + 1, remaining)
             if not chatgpt or not chatgpt.browser:
                 ensure_chatgpt()
-            create_new_account(chatgpt, ensure_mail())
+            team_emails = get_team_member_emails(chatgpt, log_prefix="[填充]")
+            if team_emails is None:
+                raise RuntimeError("创建新号前无法确认 Team 成员列表，已停止轮转")
+            if len(team_emails) >= TARGET:
+                logger.info("[5/5] Team 已补满 (%d/%d)，停止继续创建", len(team_emails), TARGET)
+                return
+            before_count = len(team_emails)
+            result_email = create_new_account(chatgpt, ensure_mail())
+            expected_emails = [result_email] if result_email else None
+            team_emails = wait_for_team_state(
+                chatgpt,
+                present_emails=expected_emails,
+                min_count=before_count + 1,
+                max_count=TARGET,
+                timeout=60,
+                interval=3,
+                log_prefix="[填充]",
+            )
+            if team_emails is None:
+                raise RuntimeError("创建新号后无法确认 Team 状态，已停止轮转")
+            if len(team_emails) > TARGET:
+                team_emails = ensure_team_capacity(chatgpt, max_seats=TARGET, fix=True, log_prefix="[限制]")
+                raise RuntimeError(f"创建新号后 Team 成员数变为 {len(team_emails)}，已自动清理回上限 {TARGET}")
 
     finally:
         if chatgpt and chatgpt.browser:
@@ -1098,8 +1196,16 @@ def cmd_add():
     mail_client.login()
 
     try:
+        team_emails = ensure_team_capacity(chatgpt, max_seats=TEAM_MAX_SEATS, fix=True, log_prefix="[限制]")
+        if len(team_emails) >= TEAM_MAX_SEATS:
+            raise RuntimeError(f"Team 已满 ({len(team_emails)}/{TEAM_MAX_SEATS})，拒绝继续添加")
         result = create_new_account(chatgpt, mail_client)  # 内部会 stop chatgpt
         if result:
+            if not chatgpt.browser:
+                chatgpt.start()
+            team_emails = ensure_team_capacity(chatgpt, max_seats=TEAM_MAX_SEATS, fix=True, log_prefix="[限制]")
+            if len(team_emails) > TEAM_MAX_SEATS:
+                raise RuntimeError(f"添加后 Team 成员数变为 {len(team_emails)}，已自动清理回上限 {TEAM_MAX_SEATS}")
             logger.info("[添加] 新账号添加成功: %s", result)
             sync_to_cpa()
         else:
@@ -1122,6 +1228,100 @@ def get_team_member_count(chatgpt_api):
     return len(members)
 
 
+def get_team_member_emails(chatgpt_api, log_prefix="[Team]"):
+    """获取当前 Team 成员邮箱集合；失败返回 None。"""
+    path = f"/backend-api/accounts/{CHATGPT_ACCOUNT_ID}/users"
+    logger.info("%s 正在获取 Team 成员列表...", log_prefix)
+    result = chatgpt_api._api_fetch("GET", path)
+    if result["status"] != 200:
+        logger.warning("%s 获取成员列表失败: HTTP %s %s",
+                       log_prefix, result.get("status"), str(result.get("body", ""))[:120])
+        return None
+
+    try:
+        data = json.loads(result["body"])
+        members = data.get("items", data.get("users", data.get("members", [])))
+    except Exception:
+        logger.warning("%s 解析成员列表失败", log_prefix)
+        return None
+
+    return {m.get("email", "").lower() for m in members if m.get("email")}
+
+
+def wait_for_team_state(chatgpt_api, *, absent_emails=None, present_emails=None,
+                        min_count=None, max_count=None, timeout=30, interval=3,
+                        log_prefix="[Team]"):
+    """
+    轮询 Team 成员列表直到满足条件，返回最新邮箱集合；超时/失败返回 None。
+    """
+    absent = {e.lower() for e in (absent_emails or [])}
+    present = {e.lower() for e in (present_emails or [])}
+    deadline = time.time() + timeout
+
+    while time.time() < deadline:
+        emails = get_team_member_emails(chatgpt_api, log_prefix=log_prefix)
+        if emails is None:
+            time.sleep(interval)
+            continue
+
+        if absent and any(email in emails for email in absent):
+            time.sleep(interval)
+            continue
+        if present and not present.issubset(emails):
+            time.sleep(interval)
+            continue
+        if min_count is not None and len(emails) < min_count:
+            time.sleep(interval)
+            continue
+        if max_count is not None and len(emails) > max_count:
+            time.sleep(interval)
+            continue
+        return emails
+
+    return None
+
+
+def ensure_team_capacity(chatgpt_api, max_seats=TEAM_MAX_SEATS, *, fix=False, log_prefix="[限制]"):
+    """
+    确保 Team 成员数不超过上限。
+    - fix=False: 超限直接报错
+    - fix=True: 先执行 cleanup 收回到上限，再返回最新成员集合
+    """
+    team_emails = get_team_member_emails(chatgpt_api, log_prefix=log_prefix)
+    if team_emails is None:
+        raise RuntimeError("无法确认 Team 成员列表，已停止操作")
+
+    current = len(team_emails)
+    if current <= max_seats:
+        return team_emails
+
+    logger.warning("%s Team 成员数 %d 超过上限 %d", log_prefix, current, max_seats)
+    if not fix:
+        raise RuntimeError(f"Team 成员数 {current} 超过上限 {max_seats}，已停止操作")
+
+    logger.warning("%s 开始自动清理多余成员...", log_prefix)
+    if chatgpt_api and chatgpt_api.browser:
+        chatgpt_api.stop()
+
+    cmd_cleanup(max_seats=max_seats)
+
+    if not chatgpt_api or not chatgpt_api.browser:
+        chatgpt_api.start()
+
+    team_emails = wait_for_team_state(
+        chatgpt_api,
+        max_count=max_seats,
+        timeout=45,
+        interval=3,
+        log_prefix=log_prefix,
+    )
+    if team_emails is None:
+        raise RuntimeError(f"清理后 Team 成员数仍未恢复到上限 {max_seats} 以内")
+
+    logger.info("%s 自动清理完成，当前 %d/%d", log_prefix, len(team_emails), max_seats)
+    return team_emails
+
+
 def cmd_fill(target=5):
     """检测 Team 成员数，不足 target 则自动添加新账号补满"""
     logger.info("[填充] 启动 ChatGPT 管理浏览器...")
@@ -1132,10 +1332,13 @@ def cmd_fill(target=5):
     mail_client.login()
 
     try:
-        current = get_team_member_count(chatgpt)
-        if current < 0:
+        target = min(target, TEAM_MAX_SEATS)
+        team_emails = ensure_team_capacity(chatgpt, max_seats=TEAM_MAX_SEATS, fix=True, log_prefix="[限制]")
+        team_emails = get_team_member_emails(chatgpt, log_prefix="[填充]")
+        if team_emails is None:
             logger.error("[填充] 获取成员列表失败")
             return
+        current = len(team_emails)
 
         logger.info("[填充] 当前 Team 成员数: %d，目标: %d", current, target)
 
@@ -1157,11 +1360,17 @@ def cmd_fill(target=5):
             reusable = get_next_reusable_account()
             if reusable and reusable.get("_quota_recovered"):
                 email = reusable["email"]
+                if email.lower() in team_emails:
+                    logger.info("[填充] %s 已在 Team 中，更新本地状态", email)
+                    update_account(email, status=STATUS_ACTIVE, last_active_at=time.time())
+                    current = len(team_emails)
+                    continue
                 logger.info("[填充] 复用旧账号: %s", email)
                 # 确保 chatgpt 浏览器可用
                 if not chatgpt.browser:
                     chatgpt.start()
                 reinvite_account(chatgpt, mail_client, reusable)
+                expected_emails = [email]
             else:
                 # 创建新账号
                 logger.info("[填充] 创建新账号...")
@@ -1170,18 +1379,32 @@ def cmd_fill(target=5):
                 result = create_new_account(chatgpt, mail_client)
                 if not result:
                     logger.warning("[填充] 本次创建未完成，将继续尝试补满")
+                    expected_emails = None
+                else:
+                    expected_emails = [result]
 
             # 验证成员数
             if not chatgpt.browser:
                 chatgpt.start()
-            new_count = get_team_member_count(chatgpt)
-            if new_count >= 0:
-                current = new_count
-                logger.info("[填充] 当前成员数: %d/%d", new_count, target)
-                if new_count <= before_count:
-                    logger.warning("[填充] 成员数未增加（仍为 %d/%d），继续下一次尝试", new_count, target)
-            else:
+            team_emails = wait_for_team_state(
+                chatgpt,
+                present_emails=expected_emails,
+                min_count=before_count if expected_emails is None else before_count + 1,
+                timeout=60,
+                interval=3,
+                log_prefix="[填充]",
+            )
+            if team_emails is None:
                 logger.warning("[填充] 本次无法确认成员数，继续下一次尝试")
+                continue
+            new_count = len(team_emails)
+            current = new_count
+            logger.info("[填充] 当前成员数: %d/%d", new_count, target)
+            if new_count > target:
+                ensure_team_capacity(chatgpt, max_seats=target, fix=True, log_prefix="[限制]")
+                raise RuntimeError(f"填充后 Team 成员数变为 {new_count}，已自动清理回上限 {target}")
+            if new_count <= before_count:
+                logger.warning("[填充] 成员数未增加（仍为 %d/%d），继续下一次尝试", new_count, target)
 
         if current < target:
             message = f"未能补满：当前 {current}/{target}，已尝试 {attempts} 次"
