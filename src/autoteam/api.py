@@ -1545,17 +1545,46 @@ def _stop_auto_check():
 DIST_DIR = Path(__file__).parent / "web" / "dist"
 
 if DIST_DIR.exists():
-    # Vite 构建的 assets 目录
+    # Next.js 静态资源
+    next_dir = DIST_DIR / "_next"
+    if next_dir.exists():
+        app.mount("/_next", StaticFiles(directory=str(next_dir)), name="next-static")
+    # 兼容旧 Vite 构建产物
     assets_dir = DIST_DIR / "assets"
     if assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
 
+    def _resolve_static(path: str) -> Path | None:
+        """解析静态导出路径，支持 Next.js trailingSlash 目录结构。"""
+        if ".." in path:
+            return None
+        candidates: list[Path] = []
+        clean = path.strip("/")
+        if not clean:
+            candidates.append(DIST_DIR / "index.html")
+        else:
+            base = DIST_DIR / clean
+            candidates.extend(
+                [
+                    base,  # 直接命中静态文件（如 favicon.ico）
+                    base / "index.html",  # Next.js trailingSlash 路由
+                    base.with_suffix(".html"),  # 无 trailingSlash 的 html
+                ]
+            )
+        for c in candidates:
+            if c.is_file():
+                return c
+        return None
+
     @app.get("/{path:path}")
     def serve_frontend(path: str):
-        """兜底路由：serve 前端 SPA"""
-        file = DIST_DIR / path
-        if file.is_file() and ".." not in path:
-            return FileResponse(str(file))
+        """兜底路由：serve Next.js 静态导出的 SPA"""
+        resolved = _resolve_static(path)
+        if resolved:
+            return FileResponse(str(resolved))
+        fallback = DIST_DIR / "404.html"
+        if fallback.is_file():
+            return FileResponse(str(fallback), status_code=404)
         return FileResponse(str(DIST_DIR / "index.html"))
 
 

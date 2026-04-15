@@ -13,3 +13,5 @@ bearer_token
 test.py
 .env
 web/node_modules/
+web/.next/
+src/autoteam/web/dist/

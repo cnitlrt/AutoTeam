@@ -11,3 +11,5 @@ bearer_token
 .env
 data/
 web/node_modules/
+web/.next/
+src/autoteam/web/dist/

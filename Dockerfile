@@ -1,39 +1,49 @@
+FROM python:3.12-slim AS frontend
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates unzip \
+    && rm -rf /var/lib/apt/lists/*
+ENV BUN_INSTALL=/usr/local/bun
+ENV PATH="/usr/local/bun/bin:${PATH}"
+RUN curl -fsSL https://bun.sh/install | bash
+
+WORKDIR /build/web
+COPY web/package.json web/bun.lock* ./
+RUN bun install --frozen-lockfile || bun install
+COPY web/ ./
+# next.config.mjs emits to ../src/autoteam/web/dist — create target
+RUN mkdir -p /build/src/autoteam/web
+RUN bun run build
+
+
 FROM python:3.12-slim
 
-# 系统依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
     curl \
     fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:$PATH"
 
 WORKDIR /app
 
-# 复制项目文件
 COPY pyproject.toml uv.lock ./
 RUN uv sync --no-dev
 
-# 安装 Playwright 浏览器
 RUN uv run playwright install chromium && uv run playwright install-deps chromium
 
-# 复制源码
 COPY src/ src/
-COPY web/ web/
+# Copy the Next.js static export built in the frontend stage
+COPY --from=frontend /build/src/autoteam/web/dist /app/src/autoteam/web/dist
 
-# 数据卷（.env、accounts.json、auths/、state.json、screenshots/）
 VOLUME ["/app/data"]
 
-# 启动时将数据目录软链到工作目录
 RUN mkdir -p /app/data
 ENV DISPLAY=:99
 
 EXPOSE 8787
 
-# 启动脚本
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
