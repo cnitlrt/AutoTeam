@@ -4,7 +4,7 @@ import { motion } from "framer-motion";
 import { KeyRound, Sparkles } from "lucide-react";
 import { useAuth } from "@/components/providers/auth-provider";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -52,10 +52,9 @@ export default function LoginPage() {
               <div className="space-y-2">
                 <Label htmlFor="apikey">API Key</Label>
                 <div className="relative">
-                  <KeyRound className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                  <Input
+                  <KeyRound className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground z-10" />
+                  <PasswordInput
                     id="apikey"
-                    type="password"
                     value={key}
                     onChange={(e) => setKey(e.target.value)}
                     placeholder="粘贴 API Key"

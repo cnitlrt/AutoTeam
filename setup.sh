@@ -16,8 +16,13 @@ fi
 # 安装 Python 依赖
 uv sync
 
-# 安装 Playwright 浏览器
-uv run playwright install chromium
+# 安装 Google Chrome（供 patchright channel="chrome" 使用，更难被 Cloudflare 识别）
+if ! command -v google-chrome &> /dev/null; then
+    echo "安装 Google Chrome..."
+    curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+    sudo apt-get update && sudo apt-get install -y google-chrome-stable
+fi
 
 # 安装 pre-commit hooks
 uv run pre-commit install

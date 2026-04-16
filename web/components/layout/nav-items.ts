@@ -7,6 +7,8 @@ import {
   Activity,
   ScrollText,
   Settings,
+  MessageSquare,
+  Globe,
   type LucideIcon,
 } from "lucide-react";
 
@@ -53,6 +55,20 @@ export const NAV_ITEMS: NavItem[] = [
     label: "OAuth 登录",
     description: "手动导入账号授权",
     icon: KeyRound,
+  },
+  {
+    key: "sms",
+    href: "/sms",
+    label: "SMS",
+    description: "手机号验证提供商与余额",
+    icon: MessageSquare,
+  },
+  {
+    key: "proxy",
+    href: "/proxy",
+    label: "代理",
+    description: "代理池管理与健康检查",
+    icon: Globe,
   },
   {
     key: "tasks",

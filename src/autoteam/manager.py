@@ -608,23 +608,17 @@ def invite_to_team(chatgpt_api, email, seat_type="default"):
 
 def _complete_registration(email, password, invite_link, mail_client):
     """完成注册 + Codex 登录（从已有邀请链接继续）"""
-    from playwright.sync_api import sync_playwright
+    from patchright.sync_api import sync_playwright
 
+    from autoteam.browser import launch_stealth_context
     from autoteam.invite import register_with_invite
 
     logger.info("[注册] 开始注册 %s...", email)
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-        )
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-        )
-        page = context.new_page()
+        context = launch_stealth_context(p, email=email)
+        page = context.pages[0] if context.pages else context.new_page()
         result, password = register_with_invite(page, invite_link, email, mail_client, password=password)
-        browser.close()
+        context.close()
 
     if not result:
         logger.error("[注册] 注册 %s 失败", email)
@@ -741,6 +735,17 @@ def _page_excerpt(page, limit=240):
         return page.locator("body").inner_text(timeout=1500)[:limit].replace("\n", " ")
     except Exception:
         return ""
+
+
+from autoteam.browser import (
+    describe_submit_button as _describe_submit_button,
+)
+from autoteam.browser import (
+    force_click_submit as _force_click_submit,
+)
+from autoteam.browser import (
+    react_set_input_value as _react_set_input_value,
+)
 
 
 def _first_visible_editable_locator(page, selectors, timeout=800):
@@ -956,7 +961,7 @@ def _complete_direct_about_you(page):
             if name_input.is_visible(timeout=2000):
                 try:
                     if name_input.is_editable(timeout=500):
-                        name_input.fill("User")
+                        _react_set_input_value(name_input, "User")
                         time.sleep(0.3)
                 except Exception:
                     pass
@@ -1000,13 +1005,14 @@ def _complete_direct_about_you(page):
                     'input[name="age"], input[placeholder*="年龄"], input[placeholder*="Age"]'
                 ).first
                 if age_input.is_visible(timeout=2000) and age_input.is_editable(timeout=500):
-                    age_input.fill("25")
+                    _react_set_input_value(age_input, "25")
                     logger.info("[直接注册] 填入年龄: 25")
             except Exception:
                 pass
 
         submitted = False
         for btn_selector in (
+            'button:has-text("Finish creating account")',
             'button:has-text("完成帐户创建")',
             'button:has-text("Create account")',
             'button:has-text("Continue")',
@@ -1031,8 +1037,18 @@ def _complete_direct_about_you(page):
         next_step = _wait_for_direct_register_step(
             page,
             {"profile", "completed", "code", "password", "email", "google"},
-            timeout=12,
+            timeout=8,
         )
+        # Button may look enabled but React onClick guards reject it. Force
+        # click via JS (clears disabled flags first) as a final fallback.
+        if next_step == "profile" and "about-you" in (page.url or ""):
+            logger.info("[直接注册] about-you 提交未响应，JS 强制点击完成按钮")
+            _force_click_submit(page)
+            next_step = _wait_for_direct_register_step(
+                page,
+                {"profile", "completed", "code", "password", "email", "google"},
+                timeout=10,
+            )
         logger.info("[直接注册] 提交资料后状态: %s | URL: %s", next_step, page.url)
         if next_step != "profile":
             return True
@@ -1043,25 +1059,17 @@ def _complete_direct_about_you(page):
 
 def _register_direct_once(mail_client, email, password):
     """执行一次直接注册，返回是否完成注册并进入 Team。"""
-    from playwright.sync_api import sync_playwright
+    from patchright.sync_api import sync_playwright
+
+    from autoteam.browser import launch_stealth_context
 
     logger.info("[直接注册] %s", email)
     signup_url = "https://chatgpt.com/auth/login"
 
     with sync_playwright() as p:
-        launch_kwargs = {
-            "headless": False,
-            "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-        }
-        if sys.platform.startswith("win"):
-            launch_kwargs["slow_mo"] = 100
-
-        browser = p.chromium.launch(**launch_kwargs)
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-        )
-        page = context.new_page()
+        slow_mo = 100 if sys.platform.startswith("win") else 0
+        context = launch_stealth_context(p, email=email, slow_mo=slow_mo)
+        page = context.pages[0] if context.pages else context.new_page()
 
         page.goto(signup_url, wait_until="domcontentloaded", timeout=60000)
         time.sleep(5)
@@ -1123,15 +1131,18 @@ def _register_direct_once(mail_client, email, password):
 
         if email_step == "google":
             logger.warning("[直接注册] 邮箱步骤误跳转到 Google 登录页")
-            browser.close()
+            context.close()
             return False
         if email_step == "unknown":
             logger.warning("[直接注册] 未识别到邮箱步骤 | URL: %s | body=%s", page.url, _page_excerpt(page))
-            browser.close()
+            context.close()
             return False
 
         try:
-            for attempt in range(3):
+            # 2 inner attempts — attempt 1 almost always trips Cloudflare's
+            # "email input not editable" gate; attempt 2 succeeds. More
+            # retries just waste 10s waits.
+            for attempt in range(2):
                 step = _detect_direct_register_step(page)
                 if step != "email":
                     break
@@ -1185,11 +1196,11 @@ def _register_direct_once(mail_client, email, password):
         logger.info("[直接注册] 邮箱步骤结束状态: %s | URL: %s", current_step, page.url)
         if current_step == "google":
             logger.warning("[直接注册] 邮箱步骤仍停留在 Google 登录页")
-            browser.close()
+            context.close()
             return False
         if current_step == "email":
             logger.warning("[直接注册] 邮箱步骤未推进 | URL: %s | body=%s", page.url, _page_excerpt(page))
-            browser.close()
+            context.close()
             return False
 
         # 等待页面跳转完成（可能跳到 create-account/password）
@@ -1246,11 +1257,11 @@ def _register_direct_once(mail_client, email, password):
         current_step = _detect_direct_register_step(page)
         if current_step == "google":
             logger.warning("[直接注册] 密码步骤仍停留在 Google 登录页")
-            browser.close()
+            context.close()
             return False
         if current_step == "email":
             logger.warning("[直接注册] 提交密码前流程回退到邮箱页 | URL: %s | body=%s", page.url, _page_excerpt(page))
-            browser.close()
+            context.close()
             return False
 
         code_input = None
@@ -1283,17 +1294,69 @@ def _register_direct_once(mail_client, email, password):
 
             if verification_code:
                 logger.info("[直接注册] 输入验证码: %s", verification_code)
-                code_input.fill(verification_code)
-                time.sleep(0.5)
-                _click_primary_auth_button(page, code_input, ["Continue", "继续"])
-                time.sleep(8)
+                before_url = page.url
+                try:
+                    code_input.click()
+                except Exception:
+                    pass
+                # Native setter + tracker reset — bypasses React's dedupe
+                _react_set_input_value(code_input, verification_code)
+                time.sleep(0.6)
+                btn_state = _describe_submit_button(page)
+                logger.info("[直接注册] 验证码提交前按钮状态: %s", btn_state)
+                # Submit via keyboard Enter (cheapest)
+                try:
+                    code_input.press("Enter")
+                except Exception:
+                    pass
+                time.sleep(2)
+                if page.url == before_url:
+                    # Still not navigating — click via Playwright
+                    _click_primary_auth_button(page, code_input, ["Continue", "继续"])
+                    time.sleep(2)
+                if page.url == before_url:
+                    # Still stuck — JS force-click that clears disabled flags
+                    logger.warning("[直接注册] Continue 未响应，JS 强制点击")
+                    _force_click_submit(page)
+                    time.sleep(3)
+                # Allow OpenAI's navigation to settle
+                try:
+                    page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:
+                    pass
             else:
                 logger.error("[直接注册] 未收到验证码")
-                browser.close()
+                context.close()
                 return False
 
         _safe_invite_screenshot(page, "direct_05_after_code.png")
         logger.info("[直接注册] 当前 URL: %s", page.url)
+
+        # After email code, OpenAI frequently demands phone verification at
+        # /add-phone. Reuse the SMS flow from codex_auth so the direct flow
+        # can also pass the phone page.
+        try:
+            from autoteam.codex_auth import (
+                _dump_phone_page_dom,
+                _handle_phone_verification,
+                _is_phone_verification_page,
+            )
+
+            for phone_step in range(1, 4):
+                if not _is_phone_verification_page(page):
+                    break
+                logger.info("[直接注册] 检测到手机号验证页 (step %d)", phone_step)
+                _safe_invite_screenshot(page, f"direct_05b_phone_{phone_step}.png")
+                try:
+                    _dump_phone_page_dom(page, 100 + phone_step)
+                except Exception:
+                    pass
+                if not _handle_phone_verification(page, email):
+                    logger.warning("[直接注册] 手机号验证未成功 (step %d)", phone_step)
+                    break
+                time.sleep(3)
+        except Exception as exc:
+            logger.warning("[直接注册] 手机号步骤异常: %s | URL: %s", exc, page.url)
 
         try:
             _complete_direct_about_you(page)
@@ -1320,7 +1383,7 @@ def _register_direct_once(mail_client, email, password):
         else:
             logger.warning("[直接注册] 注册可能未完成，URL: %s", current_url)
 
-        browser.close()
+        context.close()
         return success
 
 
@@ -1373,12 +1436,81 @@ def create_account_direct(mail_client):
         return email
 
 
+def create_account_invite(chatgpt_api, mail_client):
+    """Pre-invite + direct-signup flow.
+
+    The old approach (clicking the invite link from the email) tripped over
+    subtle variants of OpenAI's signup UI. We now use the *fact* of having
+    sent an invite rather than the invite link itself: once the email is
+    pre-invited to the Team, OpenAI's regular signup flow auto-joins the
+    new user to the Team (instead of leaving them on a personal free
+    account).
+
+    Steps:
+      1. Create CloudMail temp email.
+      2. Send Team invite via admin API so the email is on the workspace's
+         pending list (forces Team membership on signup).
+      3. Close the admin browser.
+      4. Use the proven direct-signup flow to register the email — same
+         code path we used to reach the "Finish creating account" step.
+      5. Signup completes → account joins Team (not free).
+    """
+    import uuid
+
+    if not chatgpt_api or not chatgpt_api.browser:
+        logger.warning("[邀请注册] 需要管理员 session，但 chatgpt_api 未初始化")
+        return None
+
+    account_id, email = mail_client.create_temp_email()
+    password = f"Tmp_{uuid.uuid4().hex[:12]}!"
+    add_account(email, password, cloudmail_account_id=account_id)
+
+    logger.info("[邀请注册] 创建临时邮箱 %s (accountId=%s)", email, account_id)
+    logger.info("[邀请注册] 向 %s 发送 Team 邀请...", email)
+    if not invite_to_team(chatgpt_api, email, seat_type="usage_based"):
+        logger.error("[邀请注册] 邀请失败: %s", email)
+        return None
+    logger.info("[邀请注册] 邀请已发送；使用直接注册路径完成账号创建...")
+
+    # 释放 ChatGPT 管理员浏览器（注册需要独立 context）
+    chatgpt_api.stop()
+
+    # Use the direct-signup flow. Because the email is pre-invited, the
+    # resulting account will auto-join the Team on the admin's plan.
+    success = False
+    for attempt in range(3):
+        logger.info("[邀请注册] 直接注册尝试 %d/3: %s", attempt + 1, email)
+        if _register_direct_once(mail_client, email, password):
+            success = True
+            break
+        if _is_email_in_team(email):
+            logger.info("[邀请注册] 远端确认账号已在 Team: %s", email)
+            success = True
+            break
+        if attempt < 2:
+            time.sleep(30)
+
+    if not success:
+        logger.error("[邀请注册] 注册失败: %s", email)
+        return None
+
+    # Trigger Codex login to save auth file (mirrors _complete_registration).
+    bundle = login_codex_via_browser(email, password, mail_client=mail_client)
+    if bundle:
+        auth_file = save_auth_file(bundle)
+        update_account(email, status=STATUS_ACTIVE, auth_file=auth_file, last_active_at=time.time())
+        logger.info("[邀请注册] 账号就绪: %s", email)
+        return email
+    update_account(email, status=STATUS_ACTIVE)
+    logger.warning("[邀请注册] 账号已加入 Team 但 Codex 登录失败: %s", email)
+    return email
+
+
 def create_new_account(chatgpt_api, mail_client):
+    """创建新账号。优先邀请式（确保新账号加入 Team 计划）；失败时回退
+    到直接注册模式（仅在域名已配置自动加入 workspace 时有效）。
     """
-    创建新账号。优先用直接注册模式（域名自动加入 workspace）。
-    chatgpt_api 可为 None（直接注册不需要）。
-    """
-    # 先检查 pending invites
+    # 先尝试处理已有的 pending invites（之前失败重试的场景）
     if chatgpt_api and chatgpt_api.browser:
         logger.info("[创建] 先检查 pending invites...")
         completed = _check_pending_invites(chatgpt_api, mail_client)
@@ -1386,7 +1518,15 @@ def create_new_account(chatgpt_api, mail_client):
             logger.info("[创建] 从 pending invites 完成了 %d 个账号", len(completed))
             return completed[0]
 
-    # 直接注册模式（不需要邀请）
+    # 邀请式注册（新账号通过邀请链接入 Team）
+    logger.info("[创建] 使用邀请式注册...")
+    if chatgpt_api and chatgpt_api.browser:
+        result = create_account_invite(chatgpt_api, mail_client)
+        if result:
+            return result
+        logger.warning("[创建] 邀请式注册失败，回退到直接注册模式")
+
+    # 兜底：直接注册模式（依赖 OpenAI 域名 auto-join）
     logger.info("[创建] 使用直接注册模式...")
     if chatgpt_api and chatgpt_api.browser:
         chatgpt_api.stop()
@@ -1398,8 +1538,9 @@ def reinvite_account(chatgpt_api, mail_client, acc):
     恢复 standby 账号 — 直接登录（域名自动加入 workspace，不需要邀请）。
     登录后自动回到 workspace，然后刷新 Codex token。
     """
-    from playwright.sync_api import sync_playwright
+    from patchright.sync_api import sync_playwright
 
+    from autoteam.browser import launch_stealth_context
     from autoteam.invite import screenshot
 
     email = acc["email"]
@@ -1412,15 +1553,8 @@ def reinvite_account(chatgpt_api, mail_client, acc):
         chatgpt_api.stop()
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-        )
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-        )
-        page = context.new_page()
+        context = launch_stealth_context(p, email=email)
+        page = context.pages[0] if context.pages else context.new_page()
 
         # 直接去登录页
         page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded", timeout=60000)
@@ -1520,7 +1654,7 @@ def reinvite_account(chatgpt_api, mail_client, acc):
 
         screenshot(page, "reinvite_final.png")
         logger.info("[轮转] 当前 URL: %s", page.url)
-        browser.close()
+        context.close()
 
     if not _is_email_in_team(email):
         logger.warning("[轮转] 旧账号登录后仍未进入 Team，恢复失败: %s", email)

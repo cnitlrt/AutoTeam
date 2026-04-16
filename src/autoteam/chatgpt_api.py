@@ -8,7 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from patchright.sync_api import sync_playwright
 
 import autoteam.display  # noqa: F401
 from autoteam.admin_state import (
@@ -17,6 +17,7 @@ from autoteam.admin_state import (
     get_chatgpt_workspace_name,
     update_admin_state,
 )
+from autoteam.browser import launch_stealth_context
 from autoteam.textio import read_text
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ class ChatGPTTeamAPI:
         self.context = None
         self.page = None
         self.access_token = None
+        self.access_token_source = None
         self.session_token = None
         self.account_id = get_chatgpt_account_id()
         self.workspace_name = get_chatgpt_workspace_name()
@@ -114,15 +116,14 @@ class ChatGPTTeamAPI:
     def _launch_browser(self):
         SCREENSHOT_DIR.mkdir(exist_ok=True)
         self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        self.context = launch_stealth_context(
+            self.playwright,
+            email=self.login_email or "admin",
         )
-        self.context = self.browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-        )
-        self.page = self.context.new_page()
+        # Keep `self.browser` as a truthy alias so `if self.browser` still
+        # works — persistent contexts have no standalone browser object.
+        self.browser = self.context
+        self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
 
     def _log_login_state(self, label):
         try:
@@ -1167,25 +1168,50 @@ class ChatGPTTeamAPI:
         return ""
 
     def _fetch_access_token(self, allow_bearer_file=True):
-        result = self.page.evaluate("""async () => {
-            try {
-                const resp = await fetch("/api/auth/session");
-                const data = await resp.json();
-                return { ok: true, data: data };
-            } catch(e) {
-                return { ok: false, error: e.message };
-            }
-        }""")
+        # `access_token_source` lets `_api_fetch` decide whether to trust the
+        # token enough to put it in an Authorization header. Only tokens from
+        # /api/auth/session or a pinned bearer file are known to be real JWTs.
+        self.access_token_source = None
+        # Every observed run has `/api/auth/session` return `{WARNING_BANNER}`
+        # on the first call and the full session (with accessToken) only on
+        # the second. Wait up front instead of burning an attempt on the
+        # known-empty response.
+        time.sleep(5)
+        result = None
+        for attempt in range(3):
+            result = self.page.evaluate("""async () => {
+                try {
+                    const resp = await fetch("/api/auth/session", {
+                        credentials: "include",
+                        cache: "no-store",
+                    });
+                    const data = await resp.json();
+                    return { ok: true, status: resp.status, data: data };
+                } catch(e) {
+                    return { ok: false, error: e.message };
+                }
+            }""")
+            if result.get("ok") and result.get("data", {}).get("accessToken"):
+                break
+            logger.info(
+                "[ChatGPT] /api/auth/session attempt %d: ok=%s keys=%s",
+                attempt + 1,
+                result.get("ok"),
+                list((result.get("data") or {}).keys()) if isinstance(result.get("data"), dict) else result.get("data"),
+            )
+            time.sleep(3)
 
-        if result.get("ok") and "accessToken" in result.get("data", {}):
+        if result and result.get("ok") and "accessToken" in result.get("data", {}):
             self.access_token = result["data"]["accessToken"]
-            logger.info("[ChatGPT] 已获取 access token")
+            self.access_token_source = "session"
+            logger.info("[ChatGPT] 已获取 access token (from session, len=%d)", len(self.access_token))
             return "session"
 
         if allow_bearer_file:
             bearer_file = BASE_DIR / "bearer_token"
             if bearer_file.exists():
                 self.access_token = read_text(bearer_file).strip()
+                self.access_token_source = "file"
                 logger.info("[ChatGPT] 从 bearer_token 文件加载 access token")
                 return "file"
 
@@ -1194,21 +1220,63 @@ class ChatGPTTeamAPI:
         time.sleep(10)
 
         token = self.page.evaluate("""() => {
+            // Prefer a JWT (three base64url segments). If none is found,
+            // fall back to the raw value, but only if it's ASCII — otherwise
+            // fetch() will reject the Authorization header.
+            const JWT_RE = /eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+/;
+            function isAscii(s) {
+                for (let i = 0; i < s.length; i++) {
+                    if (s.charCodeAt(i) > 127) return false;
+                }
+                return true;
+            }
+            let fallback = null;
             try {
                 const keys = Object.keys(localStorage);
                 for (const key of keys) {
                     const val = localStorage.getItem(key);
-                    if (val && val.includes("eyJ") && val.length > 500) {
-                        return val;
+                    if (!val) continue;
+                    // JSON with an accessToken field.
+                    try {
+                        const parsed = JSON.parse(val);
+                        if (parsed && typeof parsed === 'object') {
+                            const cand = parsed.accessToken ||
+                                parsed.access_token ||
+                                (parsed.tokens && parsed.tokens.accessToken) ||
+                                (parsed.user && parsed.user.accessToken);
+                            if (typeof cand === 'string') {
+                                const m = cand.match(JWT_RE);
+                                if (m) return m[0];
+                                if (isAscii(cand) && cand.length > 20) return cand;
+                            }
+                        }
+                    } catch(e) {}
+                    // Raw JWT in the value.
+                    const m = val.match(JWT_RE);
+                    if (m && m[0].length > 200) return m[0];
+                    // ASCII-safe fallback candidate.
+                    if (!fallback && val.length > 500 && val.length < 6000 && isAscii(val)) {
+                        fallback = val;
                     }
                 }
             } catch(e) {}
-            return null;
+            return fallback;
         }""")
 
         if token:
+            # Extra safety: strip anything outside ISO-8859-1 to prevent the
+            # in-page fetch from rejecting the Authorization header.
+            try:
+                token.encode("ascii")
+            except Exception:
+                logger.warning("[ChatGPT] localStorage token 含非 ASCII 字符，丢弃: %r", token[:80])
+                return "none"
             self.access_token = token
-            logger.info("[ChatGPT] 从页面获取到 access token")
+            self.access_token_source = "localstorage"
+            logger.info(
+                "[ChatGPT] 从页面获取到 access token (len=%d, 仅作为备用，不放入 Authorization 头)",
+                len(token),
+            )
             return "localstorage"
         else:
             logger.warning("[ChatGPT] 未能获取 access token，将尝试无 token 调用")
@@ -1221,8 +1289,68 @@ class ChatGPTTeamAPI:
             "oai-device-id": self.oai_device_id,
             "oai-language": "en-US",
         }
-        if self.access_token:
+        # Only send Bearer for tokens known to be real JWTs (source=session or
+        # file). The localStorage fallback often yields an opaque blob that
+        # OpenAI's backend rejects with "Could not parse your access token".
+        if self.access_token and getattr(self, "access_token_source", None) in ("session", "file"):
             headers_js["authorization"] = f"Bearer {self.access_token}"
+        # Sanitize — fetch() in the page requires ISO-8859-1 header values.
+        for k, v in list(headers_js.items()):
+            try:
+                str(v).encode("latin-1")
+            except Exception:
+                logger.warning(
+                    "[ChatGPT] header %s 含非 ISO-8859-1 字符，已丢弃（len=%d）",
+                    k,
+                    len(str(v)),
+                )
+                del headers_js[k]
+
+        # Primary path: Playwright's context.request API. It inherits the
+        # browser's cookie jar automatically. ChatGPT's admin UI sends extra
+        # client-version / referer headers the server checks; include the
+        # ones we can derive so the server treats us like the real UI.
+        url = f"https://chatgpt.com{path}"
+        ui_headers = dict(headers_js)
+        ui_headers.setdefault("accept", "*/*")
+        ui_headers.setdefault("accept-language", "en-US,en;q=0.9")
+        ui_headers.setdefault("origin", "https://chatgpt.com")
+        ui_headers.setdefault(
+            "referer",
+            f"https://chatgpt.com/admin/members?workspaceId={self.account_id}",
+        )
+        ui_headers.setdefault("sec-fetch-dest", "empty")
+        ui_headers.setdefault("sec-fetch-mode", "cors")
+        ui_headers.setdefault("sec-fetch-site", "same-origin")
+
+        try:
+            kwargs = {"headers": ui_headers}
+            if body is not None:
+                kwargs["data"] = body
+            resp = self.context.request.fetch(url, method=method, **kwargs)
+            text = resp.text()
+            if resp.status >= 400:
+                # Verbose diagnostic: show response body + headers so we can
+                # see what the server actually complains about.
+                try:
+                    resp_headers = {
+                        k: v
+                        for k, v in resp.headers.items()
+                        if k.lower() in ("content-type", "www-authenticate", "x-error", "x-request-id")
+                    }
+                except Exception:
+                    resp_headers = {}
+                logger.warning(
+                    "[ChatGPT] %s %s -> %d | resp_headers=%s | body=%s",
+                    method,
+                    path,
+                    resp.status,
+                    resp_headers,
+                    (text or "")[:900],
+                )
+            return {"status": resp.status, "body": text}
+        except Exception as exc:
+            logger.debug("[ChatGPT] context.request.fetch 失败，回退到 page.evaluate: %s", exc)
 
         js_code = """async ([method, url, headers, body]) => {
             try {
@@ -1256,6 +1384,11 @@ class ChatGPTTeamAPI:
         status = result["status"]
         resp_body = result["body"]
         logger.info("[ChatGPT] 响应状态: %d", status)
+
+        # status=0 means the in-page fetch threw (network/CORS/auth). Surface
+        # the JS exception so we can diagnose instead of losing it to DEBUG.
+        if status == 0:
+            logger.warning("[ChatGPT] 邀请 fetch 失败: %s", str(resp_body)[:300])
 
         try:
             data = json.loads(resp_body)
@@ -1295,8 +1428,8 @@ class ChatGPTTeamAPI:
 
     def stop(self):
         try:
-            if self.browser:
-                self.browser.close()
+            if self.context:
+                self.context.close()
         except Exception:
             pass
         try:

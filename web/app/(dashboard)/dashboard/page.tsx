@@ -130,6 +130,8 @@ export default function DashboardPage() {
             <AnimatePresence initial={false}>
               {accounts.map((acc, i) => {
                 const q = (data?.quota_cache?.[acc.email] ?? acc.last_quota ?? {}) as QuotaInfo;
+                const primaryRemain = q.primary_pct == null ? null : 100 - q.primary_pct;
+                const weeklyRemain = q.weekly_pct == null ? null : 100 - q.weekly_pct;
                 return (
                   <motion.tr
                     key={acc.email}
@@ -145,10 +147,10 @@ export default function DashboardPage() {
                       <StatusBadge status={acc.status} />
                     </TableCell>
                     <TableCell>
-                      <QuotaBar pct={q.primary_pct} />
+                      <QuotaBar pct={primaryRemain} />
                     </TableCell>
                     <TableCell>
-                      <QuotaBar pct={q.weekly_pct} />
+                      <QuotaBar pct={weeklyRemain} />
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {formatResetIn(q.primary_resets_at)}

@@ -7,6 +7,7 @@ import { usePolling } from "@/lib/hooks";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -136,9 +137,8 @@ function AdminCard({
               onChange={(e) => setEmail(e.target.value)}
               className="flex-1"
             />
-            <Input
+            <PasswordInput
               placeholder="session token"
-              type="password"
               value={session}
               onChange={(e) => setSession(e.target.value)}
               className="flex-[2]"
@@ -158,10 +158,10 @@ function AdminCard({
 
       {inProgress && step === "password_required" && (
         <FormRow label="请输入管理员密码">
-          <Input
-            type="password"
+          <PasswordInput
             value={password}
             onChange={(e) => setPassword(e.target.value)}
+            className="flex-1"
           />
           <Button
             disabled={busy || !password}
@@ -285,10 +285,10 @@ function MainCodexCard({
 
       {status?.in_progress && status.step === "password_required" && (
         <FormRow label="主号密码">
-          <Input
-            type="password"
+          <PasswordInput
             value={password}
             onChange={(e) => setPassword(e.target.value)}
+            className="flex-1"
           />
           <Button
             disabled={busy || !password}

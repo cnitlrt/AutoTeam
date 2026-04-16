@@ -22,8 +22,13 @@ import re
 import sys
 import time
 
-from playwright.sync_api import sync_playwright
+from patchright.sync_api import sync_playwright
 
+from autoteam.browser import (
+    force_click_submit,
+    launch_stealth_context,
+    react_set_input_value,
+)
 from autoteam.chatgpt_api import ChatGPTTeamAPI
 from autoteam.cloudmail import CloudMailClient
 
@@ -117,10 +122,18 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
     )
 
     if email_input:
-        email_input.fill(email)
+        try:
+            email_input.click()
+        except Exception:
+            pass
+        react_set_input_value(email_input, email)
+        time.sleep(0.5)
+        try:
+            email_input.press("Enter")
+        except Exception:
+            pass
         time.sleep(1)
-
-        # 点击 Continue
+        # Fallback: button click + JS force-click if still on the same page
         find_and_click(
             page,
             [
@@ -130,7 +143,10 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
             ],
             "继续按钮",
         )
-        time.sleep(5)
+        time.sleep(2)
+        if "email" in (page.url or "") and "verification" not in (page.url or ""):
+            force_click_submit(page)
+            time.sleep(3)
         screenshot(page, "reg_03_after_email.png")
     else:
         logger.info("[注册] 未找到邮箱输入框，可能页面已自动填入")
@@ -154,9 +170,17 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
 
             password = f"Tmp_{uuid.uuid4().hex[:12]}!"
         logger.info("[注册] 设置密码: %s", password)
-        pwd_input.fill(password)
+        try:
+            pwd_input.click()
+        except Exception:
+            pass
+        react_set_input_value(pwd_input, password)
+        time.sleep(0.5)
+        try:
+            pwd_input.press("Enter")
+        except Exception:
+            pass
         time.sleep(1)
-
         find_and_click(
             page,
             [
@@ -166,7 +190,10 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
             ],
             "继续按钮",
         )
-        time.sleep(5)
+        time.sleep(2)
+        if "password" in (page.url or ""):
+            force_click_submit(page)
+            time.sleep(3)
         screenshot(page, "reg_04_after_password.png")
 
     # 等待验证码邮件
@@ -210,12 +237,13 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
 
     # 检查是否是多个单字符输入框
     single_inputs = page.locator('input[maxlength="1"]').all()
+    code_input = None
     if len(single_inputs) >= 4:
         logger.debug("[注册] 检测到 %d 个单字符输入框", len(single_inputs))
         for i, char in enumerate(verification_code):
             if i < len(single_inputs):
-                single_inputs[i].fill(char)
-                time.sleep(0.2)
+                react_set_input_value(single_inputs[i], char)
+                time.sleep(0.1)
     else:
         code_input = find_visible(
             page,
@@ -229,13 +257,23 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
             "验证码输入框",
         )
         if code_input:
-            code_input.fill(verification_code)
+            try:
+                code_input.click()
+            except Exception:
+                pass
+            react_set_input_value(code_input, verification_code)
         else:
             logger.warning("[注册] 未找到验证码输入框")
             screenshot(page, "reg_05_no_code_input.png")
             return False, password
 
-    time.sleep(1)
+    time.sleep(0.5)
+    if code_input is not None:
+        try:
+            code_input.press("Enter")
+        except Exception:
+            pass
+        time.sleep(2)
 
     # 点击确认
     find_and_click(
@@ -249,7 +287,10 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
         "确认按钮",
     )
 
-    time.sleep(8)
+    time.sleep(2)
+    if "verification" in (page.url or "") or "code" in (page.url or ""):
+        force_click_submit(page)
+    time.sleep(6)
     screenshot(page, "reg_06_after_code.png")
     logger.info("[注册] 当前 URL: %s", page.url)
 
@@ -267,7 +308,11 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
     )
 
     if name_input:
-        name_input.fill("User")
+        try:
+            name_input.click()
+        except Exception:
+            pass
+        react_set_input_value(name_input, "User")
         time.sleep(0.5)
 
     # 自适应：生日日期（spinbutton）或年龄（普通 input）
@@ -302,7 +347,11 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
             timeout=3000,
         )
         if age_input:
-            age_input.fill("25")
+            try:
+                age_input.click()
+            except Exception:
+                pass
+            react_set_input_value(age_input, "25")
             logger.info("[注册] 填入年龄: 25")
             filled_age = True
 
@@ -310,6 +359,7 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
         find_and_click(
             page,
             [
+                'button:has-text("Finish creating account")',
                 'button:has-text("完成帐户创建")',
                 'button:has-text("Complete")',
                 'button:has-text("Continue")',
@@ -318,7 +368,13 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
             ],
             "完成按钮",
         )
-        time.sleep(8)
+        time.sleep(3)
+        # If still on about-you, force-click (button may be disabled by
+        # React class rather than the disabled attribute)
+        if "about-you" in (page.url or "") or "create-account" in (page.url or ""):
+            force_click_submit(page)
+            time.sleep(5)
+        time.sleep(3)
         screenshot(page, "reg_07_after_profile.png")
 
     # 可能需要接受条款 / 加入 workspace
@@ -403,20 +459,13 @@ def run():
         logger.info("[邀请] 开始注册 ChatGPT 账号")
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-            )
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-            )
-            page = context.new_page()
+            context = launch_stealth_context(p, email=email)
+            page = context.pages[0] if context.pages else context.new_page()
 
             result, pwd = register_with_invite(page, invite_link, email, mail_client)
 
             screenshot(page, "final.png")
-            browser.close()
+            context.close()
 
         if result:
             logger.info("[邀请] %s 已注册并加入 ChatGPT Team", email)

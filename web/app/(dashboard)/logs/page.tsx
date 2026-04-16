@@ -2,9 +2,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Loader2, Pause, Play, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
+import { usePolling } from "@/lib/hooks";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { VncViewer } from "@/components/feature/vnc-viewer";
 import { cn } from "@/lib/utils";
 import type { LogLine } from "@/lib/types";
 
@@ -30,6 +32,7 @@ export default function LogsPage() {
   const [loading, setLoading] = useState(true);
   const lastTsRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const { data: browser } = usePolling(api.getBrowserStatus, 3000);
 
   useEffect(() => {
     let active = true;
@@ -72,7 +75,14 @@ export default function LogsPage() {
   }, [logs, autoScroll]);
 
   return (
-    <Card className="flex flex-col h-[calc(100vh-180px)]">
+    <div className="space-y-4">
+      <VncViewer
+        active={!!browser?.active}
+        label={browser?.email ? `${browser.label} · ${browser.email}` : browser?.label}
+        elapsed={browser?.elapsed_seconds}
+        className="h-[320px] md:h-[400px]"
+      />
+      <Card className="flex flex-col h-[calc(100vh-560px)] min-h-[320px]">
       <div className="flex items-center justify-between px-5 py-3 border-b border-border/50">
         <div className="flex items-center gap-3">
           <div className="font-semibold">实时日志</div>
@@ -117,6 +127,7 @@ export default function LogsPage() {
           </div>
         ))}
       </div>
-    </Card>
+      </Card>
+    </div>
   );
 }

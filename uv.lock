@@ -40,11 +40,11 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
-    { name = "playwright" },
+    { name = "patchright" },
     { name = "requests" },
     { name = "rich" },
     { name = "uvicorn", extra = ["standard"] },
-    { name = "xvfbwrapper" },
+    { name = "xvfbwrapper", marker = "sys_platform == 'linux'" },
 ]
 
 [package.dev-dependencies]
@@ -56,11 +56,11 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.135.3" },
-    { name = "playwright", specifier = ">=1.40.0" },
+    { name = "patchright", specifier = ">=1.40.0" },
     { name = "requests", specifier = ">=2.28.0" },
     { name = "rich", specifier = ">=14.3.4" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.44.0" },
-    { name = "xvfbwrapper", specifier = ">=0.2.9" },
+    { name = "xvfbwrapper", marker = "sys_platform == 'linux'", specifier = ">=0.2.9" },
 ]
 
 [package.metadata.requires-dev]
@@ -426,31 +426,31 @@ wheels = [
 ]
 
 [[package]]
-name = "platformdirs"
-version = "4.9.6"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/9f/4a/0883b8e3802965322523f0b200ecf33d31f10991d0401162f4b23c698b42/platformdirs-4.9.6.tar.gz", hash = "sha256:3bfa75b0ad0db84096ae777218481852c0ebc6c727b3168c1b9e0118e458cf0a", size = 29400, upload-time = "2026-04-09T00:04:10.812Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/75/a6/a0a304dc33b49145b21f4808d763822111e67d1c3a32b524a1baf947b6e1/platformdirs-4.9.6-py3-none-any.whl", hash = "sha256:e61adb1d5e5cb3441b4b7710bea7e4c12250ca49439228cc1021c00dcfac0917", size = 21348, upload-time = "2026-04-09T00:04:09.463Z" },
-]
-
-[[package]]
-name = "playwright"
-version = "1.58.0"
+name = "patchright"
+version = "1.58.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "greenlet" },
     { name = "pyee" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f8/c9/9c6061d5703267f1baae6a4647bfd1862e386fbfdb97d889f6f6ae9e3f64/playwright-1.58.0-py3-none-macosx_10_13_x86_64.whl", hash = "sha256:96e3204aac292ee639edbfdef6298b4be2ea0a55a16b7068df91adac077cc606", size = 42251098, upload-time = "2026-01-30T15:09:24.028Z" },
-    { url = "https://files.pythonhosted.org/packages/e0/40/59d34a756e02f8c670f0fee987d46f7ee53d05447d43cd114ca015cb168c/playwright-1.58.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:70c763694739d28df71ed578b9c8202bb83e8fe8fb9268c04dd13afe36301f71", size = 41039625, upload-time = "2026-01-30T15:09:27.558Z" },
-    { url = "https://files.pythonhosted.org/packages/e1/ee/3ce6209c9c74a650aac9028c621f357a34ea5cd4d950700f8e2c4b7fe2c4/playwright-1.58.0-py3-none-macosx_11_0_universal2.whl", hash = "sha256:185e0132578733d02802dfddfbbc35f42be23a45ff49ccae5081f25952238117", size = 42251098, upload-time = "2026-01-30T15:09:30.461Z" },
-    { url = "https://files.pythonhosted.org/packages/f1/af/009958cbf23fac551a940d34e3206e6c7eed2b8c940d0c3afd1feb0b0589/playwright-1.58.0-py3-none-manylinux1_x86_64.whl", hash = "sha256:c95568ba1eda83812598c1dc9be60b4406dffd60b149bc1536180ad108723d6b", size = 46235268, upload-time = "2026-01-30T15:09:33.787Z" },
-    { url = "https://files.pythonhosted.org/packages/d9/a6/0e66ad04b6d3440dae73efb39540c5685c5fc95b17c8b29340b62abbd952/playwright-1.58.0-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:8f9999948f1ab541d98812de25e3a8c410776aa516d948807140aff797b4bffa", size = 45964214, upload-time = "2026-01-30T15:09:36.751Z" },
-    { url = "https://files.pythonhosted.org/packages/0e/4b/236e60ab9f6d62ed0fd32150d61f1f494cefbf02304c0061e78ed80c1c32/playwright-1.58.0-py3-none-win32.whl", hash = "sha256:1e03be090e75a0fabbdaeab65ce17c308c425d879fa48bb1d7986f96bfad0b99", size = 36815998, upload-time = "2026-01-30T15:09:39.627Z" },
-    { url = "https://files.pythonhosted.org/packages/41/f8/5ec599c5e59d2f2f336a05b4f318e733077cd5044f24adb6f86900c3e6a7/playwright-1.58.0-py3-none-win_amd64.whl", hash = "sha256:a2bf639d0ce33b3ba38de777e08697b0d8f3dc07ab6802e4ac53fb65e3907af8", size = 36816005, upload-time = "2026-01-30T15:09:42.449Z" },
-    { url = "https://files.pythonhosted.org/packages/c8/c4/cc0229fea55c87d6c9c67fe44a21e2cd28d1d558a5478ed4d617e9fb0c93/playwright-1.58.0-py3-none-win_arm64.whl", hash = "sha256:32ffe5c303901a13a0ecab91d1c3f74baf73b84f4bedbb6b935f5bc11cc98e1b", size = 33085919, upload-time = "2026-01-30T15:09:45.71Z" },
+    { url = "https://files.pythonhosted.org/packages/41/2f/afacd242f1ac8265275531c2e1be387f0c3b87ed14accff118c1e824695e/patchright-1.58.2-py3-none-macosx_10_13_x86_64.whl", hash = "sha256:3930464552e52f4d5283998db5797e1797c1869206bce25c065b2d84a69e6bfb", size = 42237382, upload-time = "2026-03-07T07:42:41.261Z" },
+    { url = "https://files.pythonhosted.org/packages/9b/38/e8f173299b05bbf5fd0278fbee5ceaf25eab93fece203bb5b08ae924d604/patchright-1.58.2-py3-none-macosx_11_0_arm64.whl", hash = "sha256:be76fa83f5b36219375fc0ed52f76de800eb2388844c185bb857a2e107caea13", size = 41025905, upload-time = "2026-03-07T07:42:44.961Z" },
+    { url = "https://files.pythonhosted.org/packages/ba/08/5c97f3f3300a93c62b417b5dac86d22ad771e0941cd5b59c6054d7716197/patchright-1.58.2-py3-none-macosx_11_0_universal2.whl", hash = "sha256:8dc1005c5683c8661de461e5ee85f857b43758f1e2599a7d8a44c50c6ad9c5d7", size = 42237381, upload-time = "2026-03-07T07:42:48.156Z" },
+    { url = "https://files.pythonhosted.org/packages/e5/2b/cb8b7053f2ede3586d89cb7e45f7b643751f8d97b4dfa9af7f4188aac3f9/patchright-1.58.2-py3-none-manylinux1_x86_64.whl", hash = "sha256:13aef416c59f23f0fb552658281890ef349db2bee2e449c159560867c2e6cb61", size = 46221550, upload-time = "2026-03-07T07:42:51.984Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/d9/33f3c4839ddbc3255ab012457220d56d7a910174a0a41424f6424a8b156f/patchright-1.58.2-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:0e68d0c538b5bd2bd6ef0b1327e9e766c3919d5aeade8b7bd4b29ecd3adfc0b4", size = 45950498, upload-time = "2026-03-07T07:42:55.814Z" },
+    { url = "https://files.pythonhosted.org/packages/bb/63/3b054f25a44721b9a530ec12de33d6b5d94cd9952748c2586b2a64ef62ba/patchright-1.58.2-py3-none-win32.whl", hash = "sha256:7dac724893fde90d726b125f7c35507a2afb5480c23cb57f88a31484d131de98", size = 36802278, upload-time = "2026-03-07T07:42:59.362Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/11/f06d2f6ae8e0c1aea4b17b18a105dc2ad28e358217896eb3720e80e2d297/patchright-1.58.2-py3-none-win_amd64.whl", hash = "sha256:9b740c13343a6e412efe052d0c17a65910cc4e3fd0fd6b62c1ac8dc1eec4c158", size = 36802282, upload-time = "2026-03-07T07:43:02.775Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/ae/a85dca1ebcdfc63e5838783c0929d82066dacd7448e29911d052bbd286cb/patchright-1.58.2-py3-none-win_arm64.whl", hash = "sha256:958cd884787d140dd464ec2901ea85b9634aad5e8444a267f407ee648de04667", size = 33072202, upload-time = "2026-03-07T07:43:06.344Z" },
+]
+
+[[package]]
+name = "platformdirs"
+version = "4.9.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9f/4a/0883b8e3802965322523f0b200ecf33d31f10991d0401162f4b23c698b42/platformdirs-4.9.6.tar.gz", hash = "sha256:3bfa75b0ad0db84096ae777218481852c0ebc6c727b3168c1b9e0118e458cf0a", size = 29400, upload-time = "2026-04-09T00:04:10.812Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/75/a6/a0a304dc33b49145b21f4808d763822111e67d1c3a32b524a1baf947b6e1/platformdirs-4.9.6-py3-none-any.whl", hash = "sha256:e61adb1d5e5cb3441b4b7710bea7e4c12250ca49439228cc1021c00dcfac0917", size = 21348, upload-time = "2026-04-09T00:04:09.463Z" },
 ]
 
 [[package]]

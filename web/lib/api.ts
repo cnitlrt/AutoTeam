@@ -6,7 +6,12 @@ import type {
   LogsResponse,
   MainCodexStatus,
   ManualAccountStatus,
+  ProxyConfig,
   SetupStatus,
+  SMSProvider,
+  SMSProvidersResponse,
+  SMSRentalCreated,
+  SMSService,
   StatusResponse,
   TaskItem,
   TeamMembersResponse,
@@ -140,6 +145,11 @@ export const api = {
 
   getTasks: () => request<TaskItem[]>("GET", "/tasks"),
   getTask: (id: string) => request<TaskItem>("GET", `/tasks/${id}`),
+  cancelTask: (id: string) =>
+    request<{ message: string; task: TaskItem }>(
+      "POST",
+      `/tasks/${encodeURIComponent(id)}/cancel`,
+    ),
 
   getAutoCheckConfig: () => request<AutoCheckConfig>("GET", "/config/auto-check"),
   setAutoCheckConfig: (cfg: AutoCheckConfig) =>
@@ -151,6 +161,70 @@ export const api = {
 
   getLogs: (limit = 200, since = 0) =>
     request<LogsResponse>("GET", `/logs?limit=${limit}&since=${since}`),
+
+  getBrowserStatus: () =>
+    request<{
+      active: boolean;
+      label?: string;
+      email?: string;
+      member_type?: string;
+      started_at?: number;
+      elapsed_seconds?: number;
+    }>("GET", "/browser/status"),
+
+  getSmsProviders: () => request<SMSProvidersResponse>("GET", "/sms/providers"),
+  addSmsProvider: (params: {
+    type: string;
+    api_key: string;
+    label?: string;
+    enabled?: boolean;
+  }) => request<SMSProvider>("POST", "/sms/providers", params),
+  updateSmsProvider: (
+    id: string,
+    params: { api_key?: string; label?: string; enabled?: boolean },
+  ) => request<SMSProvider>("PUT", `/sms/providers/${encodeURIComponent(id)}`, params),
+  deleteSmsProvider: (id: string) =>
+    request<{ message: string }>("DELETE", `/sms/providers/${encodeURIComponent(id)}`),
+  reorderSmsProviders: (order: string[]) =>
+    request<{ providers: SMSProvider[] }>("POST", "/sms/providers/reorder", { order }),
+  testSmsProvider: (id: string) =>
+    request<{ balance: number }>("POST", `/sms/providers/${encodeURIComponent(id)}/test`),
+  getSmsProviderServices: (id: string) =>
+    request<{ services: SMSService[] }>("GET", `/sms/providers/${encodeURIComponent(id)}/services`),
+  rentSms: (params: {
+    service?: string;
+    provider_id?: string;
+    max_price?: number | null;
+    carrier?: string | null;
+    keep_carrier?: boolean | null;
+    lock_area_code?: boolean | null;
+    area_codes?: string | null;
+  }) => request<SMSRentalCreated>("POST", "/sms/rent", params),
+  cancelSms: (id: string, providerId: string) =>
+    request<{ message: string }>(
+      "POST",
+      `/sms/rentals/${encodeURIComponent(id)}/cancel?provider_id=${encodeURIComponent(providerId)}`,
+    ),
+  completeSms: (id: string, providerId: string) =>
+    request<{ message: string }>(
+      "POST",
+      `/sms/rentals/${encodeURIComponent(id)}/complete?provider_id=${encodeURIComponent(providerId)}`,
+    ),
+  getSmsRentalStatus: (id: string, providerId: string) =>
+    request<{ id: number; status: string; code: string | null; number: string }>(
+      "GET",
+      `/sms/rentals/${encodeURIComponent(id)}?provider_id=${encodeURIComponent(providerId)}`,
+    ),
+
+  getProxyConfig: () => request<ProxyConfig>("GET", "/proxy/config"),
+  setProxyConfig: (params: { enabled?: boolean; check_interval?: number }) =>
+    request<{ enabled: boolean; check_interval: number }>("PUT", "/proxy/config", params),
+  addProxies: (proxies: string) =>
+    request<{ added: number; skipped: number; total: number }>("POST", "/proxy/add", { proxies }),
+  deleteProxy: (id: string) =>
+    request<{ message: string }>("DELETE", `/proxy/${encodeURIComponent(id)}`),
+  deleteAllProxies: () => request<{ message: string; deleted: number }>("POST", "/proxy/delete-all"),
+  checkProxies: () => request<{ message: string }>("POST", "/proxy/check"),
 };
 
 export type Api = typeof api;

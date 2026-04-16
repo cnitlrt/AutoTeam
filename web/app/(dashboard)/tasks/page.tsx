@@ -1,7 +1,8 @@
 "use client";
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Check, ChevronRight, CircleAlert, Loader2, Play, RefreshCw } from "lucide-react";
+import { Check, ChevronRight, CircleAlert, Loader2, Play, RefreshCw, StopCircle } from "lucide-react";
+import { toast } from "@/components/ui/sonner";
 import { api } from "@/lib/api";
 import { usePolling } from "@/lib/hooks";
 import { Card } from "@/components/ui/card";
@@ -43,6 +44,12 @@ function StatusBadge({ status }: { status: string }) {
         <Loader2 className="h-3 w-3 animate-spin" /> 运行中
       </Badge>
     );
+  if (status === "cancelled")
+    return (
+      <Badge variant="warning">
+        <StopCircle className="h-3 w-3" /> 已取消
+      </Badge>
+    );
   return (
     <Badge variant="muted">
       <Play className="h-3 w-3" /> 待开始
@@ -53,6 +60,22 @@ function StatusBadge({ status }: { status: string }) {
 export default function TasksPage() {
   const { data, loading, refresh } = usePolling(api.getTasks, 5000);
   const [selected, setSelected] = useState<TaskItem | null>(null);
+  const [cancelling, setCancelling] = useState<string | null>(null);
+
+  async function cancel(t: TaskItem, e: React.MouseEvent) {
+    e.stopPropagation();
+    if (!confirm(`取消任务 ${t.command}？会强制关闭浏览器会话。`)) return;
+    setCancelling(t.task_id);
+    try {
+      const r = await api.cancelTask(t.task_id);
+      toast.success(r.message);
+      refresh();
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setCancelling(null);
+    }
+  }
 
   return (
     <Card>
@@ -104,7 +127,24 @@ export default function TasksPage() {
                   {formatDuration(t.started_at, t.finished_at)}
                 </TableCell>
                 <TableCell className="text-right">
-                  <ChevronRight className="h-4 w-4 text-muted-foreground ml-auto" />
+                  <div className="flex items-center justify-end gap-1">
+                    {(t.status === "running" || t.status === "pending") && (
+                      <Button
+                        size="xs"
+                        variant="subtle"
+                        disabled={cancelling === t.task_id}
+                        onClick={(e) => cancel(t, e)}
+                      >
+                        {cancelling === t.task_id ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <StopCircle className="h-3 w-3" />
+                        )}
+                        取消
+                      </Button>
+                    )}
+                    <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                  </div>
                 </TableCell>
               </motion.tr>
             ))}

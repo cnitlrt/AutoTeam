@@ -117,6 +117,47 @@ export interface AutoCheckConfig {
   min_low: number;
 }
 
+export interface SMSProvider {
+  id: string;
+  type: string;
+  label: string;
+  enabled: boolean;
+  has_key: boolean;
+  balance?: number | null;
+  error?: string | null;
+}
+
+export interface SMSProviderType {
+  type: string;
+  name: string;
+  api_key_label: string;
+  help?: string;
+}
+
+export interface SMSProvidersResponse {
+  providers: SMSProvider[];
+  available_types: SMSProviderType[];
+  default_service: string;
+}
+
+export interface SMSService {
+  service_name?: string;
+  api_name?: string;
+  price?: string | number;
+  stock?: number;
+  ttl?: number;
+  multiple_sms?: string | boolean;
+}
+
+export interface SMSRentalCreated {
+  id: string;
+  number: string;
+  service: string;
+  price: number;
+  provider_id: string;
+  provider_type: string;
+}
+
 export interface CodexAuthExport {
   email: string;
   codex_auth: {
@@ -131,4 +172,23 @@ export interface CodexAuthExport {
     last_refresh?: string;
   };
   hint?: string;
+}
+
+export type ProxyStatus = "good" | "slow" | "bad" | "unchecked";
+
+export interface ProxyEntry {
+  id: string;
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  latency_ms: number | null;
+  status: ProxyStatus;
+  last_check: number | null;
+}
+
+export interface ProxyConfig {
+  enabled: boolean;
+  check_interval: number;
+  proxies: ProxyEntry[];
 }

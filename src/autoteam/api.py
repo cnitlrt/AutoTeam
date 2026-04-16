@@ -1,5 +1,6 @@
 """AutoTeam HTTP API - 将 CLI 功能暴露为 HTTP 接口"""
 
+import asyncio
 import json
 import logging
 import os
@@ -8,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -149,6 +150,9 @@ def post_setup_save(config: SetupConfig):
 _tasks: dict[str, dict] = {}
 _playwright_lock = threading.Lock()
 _current_task_id: str | None = None
+# Tracks who currently holds `_playwright_lock` so we can tell the user
+# *what* is blocking their request (instead of a generic "busy" message).
+_lock_holder: dict | None = None
 _admin_login_api = None
 _admin_login_step: str | None = None
 _main_codex_flow = None
@@ -210,27 +214,76 @@ class _PlaywrightExecutor:
 _pw_executor = _PlaywrightExecutor()
 
 
+def _set_lock_holder(label: str, **extra) -> None:
+    """Record who is holding the Playwright lock."""
+    global _lock_holder
+    _lock_holder = {"label": label, "started_at": time.time(), **extra}
+
+
+def _clear_lock_holder() -> None:
+    global _lock_holder
+    _lock_holder = None
+
+
+def _acquire_pw_lock(label: str, *, blocking: bool = False, **extra) -> bool:
+    """Try to acquire the shared Playwright lock and, on success, record
+    who took it. Logs a warning on contention so `/api/logs` shows the
+    conflict. Returns True if acquired."""
+    if blocking:
+        _playwright_lock.acquire()
+        _set_lock_holder(label, **extra)
+        return True
+    if _playwright_lock.acquire(blocking=False):
+        _set_lock_holder(label, **extra)
+        return True
+    holder = _lock_holder or {}
+    elapsed = int(max(0, time.time() - holder.get("started_at", time.time())))
+    logger.warning(
+        "[API] 拒绝操作 %s：锁被 %s 持有已 %ds%s",
+        label,
+        holder.get("label") or "unknown",
+        elapsed,
+        f"（{holder.get('email')}）" if holder.get("email") else "",
+    )
+    return False
+
+
+def _release_pw_lock() -> None:
+    """Release the Playwright lock and clear holder info."""
+    try:
+        _playwright_lock.release()
+    except RuntimeError:
+        # Already released — swallow so double-release in error paths is
+        # idempotent.
+        pass
+    _clear_lock_holder()
+
+
 def _current_busy_detail(default_message: str):
-    if _admin_login_api:
-        return {
-            "message": default_message,
-            "running_task": {
-                "task_id": "admin-login",
-                "command": "admin-login",
-                "started_at": None,
-            },
+    holder = _lock_holder
+    if holder:
+        label = holder.get("label") or "unknown"
+        started_at = holder.get("started_at")
+        elapsed = int(max(0, time.time() - (started_at or time.time())))
+        context_bits: list[str] = [label]
+        if holder.get("email"):
+            context_bits.append(str(holder["email"]))
+        if holder.get("member_type"):
+            context_bits.append(str(holder["member_type"]))
+        context = " · ".join(context_bits)
+        message = f"{default_message}（当前占用：{context}，已运行 {elapsed}s）"
+        running_task = {
+            "task_id": holder.get("task_id") or label,
+            "command": label,
+            "started_at": started_at,
+            "elapsed_seconds": elapsed,
         }
+        if holder.get("email"):
+            running_task["email"] = holder["email"]
+        return {"message": message, "running_task": running_task}
 
-    if _main_codex_flow:
-        return {
-            "message": default_message,
-            "running_task": {
-                "task_id": "main-codex-sync",
-                "command": "main-codex-sync",
-                "started_at": None,
-            },
-        }
-
+    # Fallback: legacy path where holder wasn't populated (shouldn't happen
+    # after the refactor, but keep the old behaviour as a safety net).
     running = _tasks.get(_current_task_id, {})
     return {
         "message": default_message,
@@ -257,7 +310,12 @@ def _run_task(task_id: str, func, *args, **kwargs):
     global _current_task_id
     task = _tasks[task_id]
 
-    _playwright_lock.acquire()
+    _acquire_pw_lock(
+        task.get("command") or "task",
+        blocking=True,
+        task_id=task_id,
+        params=task.get("params"),
+    )
     _current_task_id = task_id
     task["status"] = "running"
     task["started_at"] = time.time()
@@ -273,14 +331,14 @@ def _run_task(task_id: str, func, *args, **kwargs):
     finally:
         task["finished_at"] = time.time()
         _current_task_id = None
-        _playwright_lock.release()
+        _release_pw_lock()
 
 
 def _start_task(command: str, func, params: dict, *args, **kwargs) -> dict:
     """创建并启动后台任务，返回任务信息"""
-    if not _playwright_lock.acquire(blocking=False):
+    # 只做一次可得性探测；真正的加锁在 _run_task 中完成。
+    if _playwright_lock.locked():
         raise HTTPException(status_code=409, detail=_current_busy_detail("有任务正在执行，请等待完成后再试"))
-    _playwright_lock.release()
 
     task_id = uuid.uuid4().hex[:12]
     task = {
@@ -418,7 +476,7 @@ def _finish_admin_login(completed: dict):
                 info["main_auth_error"] = str(exc)
                 logger.warning("[API] 管理员登录完成，但刷新主号认证文件失败: %s", exc)
         if _playwright_lock.locked():
-            _playwright_lock.release()
+            _release_pw_lock()
     return {"status": "completed", "admin": _admin_status(), "info": info}
 
 
@@ -443,7 +501,7 @@ def _finish_main_codex_sync():
         _main_codex_flow = None
         _main_codex_step = None
         if _playwright_lock.locked():
-            _playwright_lock.release()
+            _release_pw_lock()
     return {
         "status": "completed",
         "message": "主号 Codex 已同步到 CPA",
@@ -505,9 +563,9 @@ def post_admin_login_start(params: AdminEmailParams):
         _admin_login_api = None
         _admin_login_step = None
         if _playwright_lock.locked():
-            _playwright_lock.release()
+            _release_pw_lock()
 
-    if not _playwright_lock.acquire(blocking=False):
+    if not _acquire_pw_lock("admin-login", email=params.email.strip()):
         raise HTTPException(
             status_code=409, detail=_current_busy_detail("有任务正在执行，请等待完成后再进行管理员登录")
         )
@@ -531,14 +589,14 @@ def post_admin_login_start(params: AdminEmailParams):
         if step in ("password_required", "code_required", "workspace_required"):
             return _set_pending_admin_login(api, step)
         _pw_executor.run(api.stop)
-        _playwright_lock.release()
+        _release_pw_lock()
         raise HTTPException(status_code=400, detail=result.get("detail") or "无法识别管理员登录步骤")
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("[API] 管理员登录 start 失败")
         if _playwright_lock.locked():
-            _playwright_lock.release()
+            _release_pw_lock()
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -550,7 +608,7 @@ def post_admin_login_session(params: AdminSessionParams):
     if _admin_login_api:
         post_admin_login_cancel()
 
-    if not _playwright_lock.acquire(blocking=False):
+    if not _acquire_pw_lock("admin-session-import", email=params.email.strip()):
         raise HTTPException(
             status_code=409,
             detail=_current_busy_detail("有任务正在执行，请等待完成后再导入管理员 session_token"),
@@ -590,7 +648,7 @@ def post_admin_login_session(params: AdminSessionParams):
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
         if _playwright_lock.locked():
-            _playwright_lock.release()
+            _release_pw_lock()
 
 
 @app.post("/api/admin/login/password")
@@ -622,7 +680,7 @@ def post_admin_login_password(params: AdminPasswordParams):
         _admin_login_api = None
         _admin_login_step = None
         if _playwright_lock.locked():
-            _playwright_lock.release()
+            _release_pw_lock()
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -655,7 +713,7 @@ def post_admin_login_code(params: AdminCodeParams):
         _admin_login_api = None
         _admin_login_step = None
         if _playwright_lock.locked():
-            _playwright_lock.release()
+            _release_pw_lock()
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -688,7 +746,7 @@ def post_admin_login_workspace(params: AdminWorkspaceParams):
         _admin_login_api = None
         _admin_login_step = None
         if _playwright_lock.locked():
-            _playwright_lock.release()
+            _release_pw_lock()
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -704,7 +762,7 @@ def post_admin_login_cancel():
         _admin_login_api = None
         _admin_login_step = None
         if _playwright_lock.locked():
-            _playwright_lock.release()
+            _release_pw_lock()
     return {"message": "管理员登录已取消", "admin": _admin_status()}
 
 
@@ -732,7 +790,7 @@ def post_main_codex_start():
         _main_codex_flow = None
         _main_codex_step = None
         if _playwright_lock.locked():
-            _playwright_lock.release()
+            _release_pw_lock()
 
     from autoteam.codex_auth import get_saved_main_auth_file
     from autoteam.cpa_sync import sync_main_codex_to_cpa
@@ -747,7 +805,7 @@ def post_main_codex_start():
             "info": {"auth_file": saved_auth_file},
         }
 
-    if not _playwright_lock.acquire(blocking=False):
+    if not _acquire_pw_lock("main-codex-sync"):
         raise HTTPException(
             status_code=409, detail=_current_busy_detail("有任务正在执行，请等待完成后再同步主号 Codex")
         )
@@ -768,13 +826,13 @@ def post_main_codex_start():
         if step in ("password_required", "code_required"):
             return _set_pending_main_codex_sync(flow, step)
         _pw_executor.run(flow.stop)
-        _playwright_lock.release()
+        _release_pw_lock()
         raise HTTPException(status_code=400, detail=result.get("detail") or "无法识别主号 Codex 登录步骤")
     except HTTPException:
         raise
     except Exception as exc:
         if _playwright_lock.locked():
-            _playwright_lock.release()
+            _release_pw_lock()
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -804,7 +862,7 @@ def post_main_codex_password(params: AdminPasswordParams):
         _main_codex_flow = None
         _main_codex_step = None
         if _playwright_lock.locked():
-            _playwright_lock.release()
+            _release_pw_lock()
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -834,7 +892,7 @@ def post_main_codex_code(params: AdminCodeParams):
         _main_codex_flow = None
         _main_codex_step = None
         if _playwright_lock.locked():
-            _playwright_lock.release()
+            _release_pw_lock()
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -850,7 +908,7 @@ def post_main_codex_cancel():
         _main_codex_flow = None
         _main_codex_step = None
         if _playwright_lock.locked():
-            _playwright_lock.release()
+            _release_pw_lock()
     return {"message": "主号 Codex 登录已取消", "codex": _main_codex_status()}
 
 
@@ -976,18 +1034,10 @@ def get_standby():
 @app.delete("/api/accounts/{email}")
 def delete_account(email: str):
     """删除本地管理账号及其关联资源。"""
-    if not _playwright_lock.acquire(blocking=False):
-        running = _tasks.get(_current_task_id, {})
+    if not _acquire_pw_lock("delete-account", email=email):
         raise HTTPException(
             status_code=409,
-            detail={
-                "message": "有任务正在执行，请等待完成后再删除账号",
-                "running_task": {
-                    "task_id": _current_task_id,
-                    "command": running.get("command", "unknown"),
-                    "started_at": running.get("started_at"),
-                },
-            },
+            detail=_current_busy_detail("有任务正在执行，请等待完成后再删除账号"),
         )
 
     try:
@@ -1005,13 +1055,13 @@ def delete_account(email: str):
             "cleanup": cleanup,
         }
     finally:
-        _playwright_lock.release()
+        _release_pw_lock()
 
 
 @app.post("/api/accounts/{email}/kick")
 def post_kick_account(email: str):
     """将账号从 Team 中移出，状态变为 standby"""
-    if not _playwright_lock.acquire(blocking=False):
+    if not _acquire_pw_lock("kick-account", email=email):
         raise HTTPException(status_code=409, detail=_current_busy_detail("有任务正在执行，请等待完成后再操作"))
 
     try:
@@ -1039,7 +1089,7 @@ def post_kick_account(email: str):
         finally:
             chatgpt.stop()
     finally:
-        _playwright_lock.release()
+        _release_pw_lock()
 
 
 class LoginAccountParams(BaseModel):
@@ -1162,7 +1212,7 @@ def get_team_members():
     if not get_admin_session_token() or not get_chatgpt_account_id():
         raise HTTPException(status_code=400, detail="请先完成管理员登录")
 
-    if not _playwright_lock.acquire(blocking=False):
+    if not _acquire_pw_lock("team-members"):
         raise HTTPException(status_code=409, detail=_current_busy_detail("有任务正在执行，请等待完成后再查询"))
 
     try:
@@ -1204,7 +1254,7 @@ def get_team_members():
         finally:
             chatgpt.stop()
     finally:
-        _playwright_lock.release()
+        _release_pw_lock()
 
 
 @app.post("/api/team/members/remove")
@@ -1215,7 +1265,7 @@ def post_team_member_remove(params: TeamMemberRemoveParams):
     if not get_admin_session_token() or not get_chatgpt_account_id():
         raise HTTPException(status_code=400, detail="请先完成管理员登录")
 
-    if not _playwright_lock.acquire(blocking=False):
+    if not _acquire_pw_lock("team-member-remove", email=params.email.strip(), member_type=params.type.strip().lower()):
         raise HTTPException(status_code=409, detail=_current_busy_detail("有任务正在执行，请等待完成后再操作"))
 
     try:
@@ -1259,7 +1309,7 @@ def post_team_member_remove(params: TeamMemberRemoveParams):
         finally:
             chatgpt.stop()
     finally:
-        _playwright_lock.release()
+        _release_pw_lock()
 
 
 # ---------------------------------------------------------------------------
@@ -1299,6 +1349,101 @@ def get_logs(limit: int = 100, since: float = 0):
     return {"logs": entries, "total": len(_log_buffer)}
 
 
+# ---------------------------------------------------------------------------
+# 浏览器实时画面 (VNC) —— 前端通过 WebSocket 连接到 Xvfb 上的 x11vnc
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/browser/status")
+def get_browser_status():
+    """返回当前是否有 Playwright 浏览器任务在运行。"""
+    holder = _lock_holder
+    if not holder:
+        return {"active": False}
+    started_at = holder.get("started_at")
+    return {
+        "active": True,
+        "label": holder.get("label"),
+        "email": holder.get("email"),
+        "member_type": holder.get("member_type"),
+        "started_at": started_at,
+        "elapsed_seconds": int(max(0, time.time() - (started_at or time.time()))),
+    }
+
+
+@app.websocket("/api/vnc/ws")
+async def vnc_ws(ws: WebSocket):
+    """将前端的 WebSocket 与容器内 127.0.0.1:5900 上的 x11vnc 对接。
+
+    FastAPI 的 HTTP 鉴权中间件不覆盖 WebSocket，所以这里就地检查 API Key。
+    浏览器无法为 WebSocket 设置 Authorization 头，因此走 `?key=` 查询参数。
+    """
+    if API_KEY:
+        token = ws.query_params.get("key", "")
+        if token != API_KEY:
+            await ws.close(code=1008)
+            return
+    # noVNC's Websock.js connects with subprotocols ["binary"]. Starlette
+    # requires us to echo the selected one back; otherwise noVNC closes
+    # the connection with "WebSocket not open as 'binary'". If the client
+    # didn't offer 'binary' (rare), fall back to None.
+    requested = ws.headers.get("sec-websocket-protocol", "")
+    offered = {s.strip() for s in requested.split(",") if s.strip()}
+    subprotocol = "binary" if "binary" in offered else None
+
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", 5900)
+    except Exception as exc:
+        logger.warning("[VNC] 无法连接本地 VNC: %s", exc)
+        await ws.accept(subprotocol=subprotocol)
+        await ws.close(code=1011)
+        return
+
+    await ws.accept(subprotocol=subprotocol)
+    logger.info("[VNC] 连接建立（subprotocol=%s，offered=%s）", subprotocol, offered or "-")
+
+    async def pump_ws_to_vnc():
+        try:
+            while True:
+                msg = await ws.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    break
+                payload = msg.get("bytes") or (msg["text"].encode() if msg.get("text") is not None else None)
+                if payload is None:
+                    continue
+                writer.write(payload)
+                await writer.drain()
+        except (WebSocketDisconnect, ConnectionError, asyncio.IncompleteReadError):
+            pass
+        except Exception as exc:
+            logger.debug("[VNC] ws→vnc 异常: %s", exc)
+        finally:
+            try:
+                writer.close()
+            except Exception:
+                pass
+
+    async def pump_vnc_to_ws():
+        try:
+            while True:
+                data = await reader.read(65536)
+                if not data:
+                    break
+                await ws.send_bytes(data)
+        except (WebSocketDisconnect, ConnectionError):
+            pass
+        except Exception as exc:
+            logger.debug("[VNC] vnc→ws 异常: %s", exc)
+        finally:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+    await asyncio.gather(pump_ws_to_vnc(), pump_vnc_to_ws(), return_exceptions=True)
+    logger.info("[VNC] 连接已关闭")
+
+
 @app.post("/api/sync/main-codex")
 def post_sync_main_codex():
     """兼容旧接口：开始主号 Codex 登录并同步到 CPA。"""
@@ -1311,6 +1456,226 @@ def get_cpa_files():
     from autoteam.cpa_sync import list_cpa_files
 
     return list_cpa_files()
+
+
+# ---------------------------------------------------------------------------
+# SMS 验证：多提供商管理
+# ---------------------------------------------------------------------------
+
+
+class SMSProviderCreate(BaseModel):
+    type: str
+    api_key: str
+    label: str = ""
+    enabled: bool = True
+
+
+class SMSProviderUpdate(BaseModel):
+    api_key: str | None = None
+    label: str | None = None
+    enabled: bool | None = None
+
+
+class SMSProviderReorder(BaseModel):
+    order: list[str]
+
+
+class SMSRentParams(BaseModel):
+    service: str = ""
+    provider_id: str | None = None
+    max_price: float | None = None
+    carrier: str | None = None
+    keep_carrier: bool | None = None
+    lock_area_code: bool | None = None
+    area_codes: str | None = None
+
+
+def _sanitize_provider(entry: dict, *, include_balance: bool = False) -> dict:
+    """Strip the API key for normal listings; optionally attach a live balance."""
+    out = {
+        "id": entry["id"],
+        "type": entry["type"],
+        "label": entry.get("label") or entry["type"],
+        "enabled": bool(entry.get("enabled", True)),
+        "has_key": bool(entry.get("api_key")),
+    }
+    if include_balance:
+        from autoteam.sms import instantiate_provider
+
+        provider = instantiate_provider(entry)
+        if provider is not None:
+            try:
+                out["balance"] = provider.get_balance()
+                out["error"] = None
+            except Exception as exc:
+                out["balance"] = None
+                out["error"] = str(exc)
+        else:
+            out["balance"] = None
+            out["error"] = "无法实例化提供商"
+    return out
+
+
+@app.get("/api/sms/providers")
+def get_sms_providers():
+    from autoteam import sms_store
+    from autoteam.sms import default_service, provider_types
+
+    entries = sms_store.list_providers()
+    providers = [_sanitize_provider(e, include_balance=True) for e in entries]
+    return {
+        "providers": providers,
+        "available_types": provider_types(),
+        "default_service": default_service(),
+    }
+
+
+@app.post("/api/sms/providers")
+def post_sms_provider_add(params: SMSProviderCreate):
+    from autoteam import sms_store
+    from autoteam.sms import _PROVIDER_CLASSES
+
+    if params.type not in _PROVIDER_CLASSES:
+        raise HTTPException(status_code=400, detail=f"不支持的 provider 类型: {params.type}")
+    if not params.api_key.strip():
+        raise HTTPException(status_code=400, detail="api_key 不能为空")
+    entry = sms_store.add_provider(
+        params.type, params.api_key.strip(), label=params.label.strip(), enabled=params.enabled
+    )
+    return _sanitize_provider(entry, include_balance=True)
+
+
+@app.put("/api/sms/providers/{provider_id}")
+def put_sms_provider(provider_id: str, params: SMSProviderUpdate):
+    from autoteam import sms_store
+
+    fields: dict = {}
+    if params.api_key is not None and params.api_key.strip():
+        fields["api_key"] = params.api_key.strip()
+    if params.label is not None:
+        fields["label"] = params.label.strip()
+    if params.enabled is not None:
+        fields["enabled"] = params.enabled
+    updated = sms_store.update_provider(provider_id, **fields)
+    if not updated:
+        raise HTTPException(status_code=404, detail="provider 不存在")
+    return _sanitize_provider(updated, include_balance=True)
+
+
+@app.delete("/api/sms/providers/{provider_id}")
+def delete_sms_provider(provider_id: str):
+    from autoteam import sms_store
+
+    if not sms_store.delete_provider(provider_id):
+        raise HTTPException(status_code=404, detail="provider 不存在")
+    return {"message": "已删除"}
+
+
+@app.post("/api/sms/providers/reorder")
+def post_sms_providers_reorder(params: SMSProviderReorder):
+    from autoteam import sms_store
+
+    entries = sms_store.reorder_providers(params.order)
+    return {"providers": [_sanitize_provider(e, include_balance=False) for e in entries]}
+
+
+@app.post("/api/sms/providers/{provider_id}/test")
+def post_sms_provider_test(provider_id: str):
+    from autoteam.sms import get_provider_by_id
+
+    provider = get_provider_by_id(provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="provider 不存在")
+    try:
+        balance = provider.get_balance()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"balance": balance}
+
+
+@app.get("/api/sms/providers/{provider_id}/services")
+def get_sms_provider_services(provider_id: str):
+    from autoteam.sms import get_provider_by_id
+
+    provider = get_provider_by_id(provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="provider 不存在")
+    return {"services": provider.list_services()}
+
+
+@app.post("/api/sms/rent")
+def post_sms_rent(params: SMSRentParams):
+    from autoteam.sms import (
+        SMSUnavailable,
+        default_service,
+        get_provider_by_id,
+        get_sms_chain,
+    )
+
+    service = (params.service or default_service()).strip() or default_service()
+    kwargs = {
+        k: v
+        for k, v in {
+            "max_price": params.max_price,
+            "carrier": params.carrier,
+            "keep_carrier": params.keep_carrier,
+            "lock_area_code": params.lock_area_code,
+            "area_codes": params.area_codes,
+        }.items()
+        if v is not None
+    }
+    if params.provider_id:
+        provider = get_provider_by_id(params.provider_id)
+        if provider is None:
+            raise HTTPException(status_code=404, detail="provider 不存在")
+        try:
+            rental = provider.rent_number(service=service, **kwargs)
+        except SMSUnavailable as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return rental.as_dict()
+    chain = get_sms_chain()
+    if not chain:
+        raise HTTPException(status_code=400, detail="未配置 SMS 提供商")
+    try:
+        rental = chain.rent_number(service=service, **kwargs)
+    except SMSUnavailable as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return rental.as_dict()
+
+
+def _resolve_rental_provider(provider_id: str | None):
+    """Look up the provider that a rental originated from."""
+    from autoteam.sms import get_provider_by_id
+
+    if provider_id:
+        provider = get_provider_by_id(provider_id)
+        if provider is None:
+            raise HTTPException(status_code=404, detail="provider 不存在")
+        return provider
+    raise HTTPException(status_code=400, detail="缺少 provider_id")
+
+
+@app.post("/api/sms/rentals/{rental_id}/cancel")
+def post_sms_cancel(rental_id: str, provider_id: str = ""):
+    provider = _resolve_rental_provider(provider_id)
+    provider.cancel(rental_id)
+    return {"message": f"已取消 {rental_id}"}
+
+
+@app.post("/api/sms/rentals/{rental_id}/complete")
+def post_sms_complete(rental_id: str, provider_id: str = ""):
+    provider = _resolve_rental_provider(provider_id)
+    provider.mark_complete(rental_id)
+    return {"message": f"已完成 {rental_id}"}
+
+
+@app.get("/api/sms/rentals/{rental_id}")
+def get_sms_rental_status(rental_id: str, provider_id: str = ""):
+    provider = _resolve_rental_provider(provider_id)
+    try:
+        return provider.rental_status(rental_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -1365,6 +1730,72 @@ def post_cleanup(params: CleanupParams = CleanupParams()):
 
     task = _start_task("cleanup", cmd_cleanup, {"max_seats": params.max_seats}, params.max_seats)
     return task
+
+
+def _kill_chrome_processes() -> int:
+    """Forcibly terminate any running Chrome/Chromium processes so a stuck
+    Playwright session errors out. Also clears SingletonLock / SingletonCookie
+    / SingletonSocket files in the profile dirs — otherwise Chrome's next
+    launch refuses to start because it thinks the profile is "in use by
+    another process on another computer"."""
+    import signal
+    import subprocess as _sp
+    import time as _t
+
+    killed = 0
+    try:
+        out = _sp.check_output(["pgrep", "-f", "chrome|chromium"], text=True)
+        pids = [int(p) for p in out.strip().splitlines() if p.strip()]
+        # SIGTERM first, then SIGKILL anything that survived.
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed += 1
+            except Exception:
+                pass
+        if pids:
+            _t.sleep(0.5)
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except Exception:
+                    pass
+    except _sp.CalledProcessError:
+        pass
+    except FileNotFoundError:
+        pass
+    # Remove singleton lock files so subsequent launches work.
+    try:
+        from autoteam.browser import _profile_root
+
+        root = _profile_root()
+        for p in root.rglob("Singleton*"):
+            try:
+                p.unlink()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return killed
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+def post_task_cancel(task_id: str):
+    """Cancel a running background task by killing the associated Chrome
+    session. The worker's Playwright call will raise, the finally block
+    releases the lock, and the task is marked as cancelled."""
+    task = _tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.get("status") in ("completed", "failed", "cancelled"):
+        return {"message": "任务已结束", "task": task}
+    killed = _kill_chrome_processes()
+    task["cancel_requested"] = True
+    task["status"] = "cancelled"
+    task["finished_at"] = time.time()
+    task["error"] = task.get("error") or "已取消"
+    logger.warning("[API] 任务 %s 已请求取消（kill %d Chrome 进程）", task_id[:8], killed)
+    return {"message": f"已请求取消（终止 {killed} 个 Chrome 进程）", "task": task}
 
 
 @app.get("/api/tasks")
@@ -1463,11 +1894,14 @@ def _auto_check_loop():
                 )
 
             if len(low_accounts) >= cfg["min_low"]:
-                # 检查是否有任务在跑
-                if not _playwright_lock.acquire(blocking=False):
-                    logger.info("[巡检] 有任务正在执行，跳过本轮自动轮转")
+                # 只做探测；真正的加锁由 _run_task 完成。
+                if _playwright_lock.locked():
+                    holder = _lock_holder or {}
+                    logger.info(
+                        "[巡检] 有任务正在执行（%s），跳过本轮自动轮转",
+                        holder.get("label") or "unknown",
+                    )
                     continue
-                _playwright_lock.release()
 
                 # 将低于阈值的账号标记为 exhausted，rotate 会自动移出并补充
                 from autoteam.accounts import STATUS_EXHAUSTED, update_account
@@ -1532,10 +1966,133 @@ def _start_auto_check():
     thread = threading.Thread(target=_auto_check_loop, daemon=True)
     thread.start()
 
+    proxy_thread = threading.Thread(target=_proxy_check_loop, daemon=True)
+    proxy_thread.start()
+
+
+_proxy_check_stop = threading.Event()
+
 
 @app.on_event("shutdown")
 def _stop_auto_check():
     _auto_check_stop.set()
+    _proxy_check_stop.set()
+
+
+# ---------------------------------------------------------------------------
+# Proxy management
+# ---------------------------------------------------------------------------
+
+
+def _proxy_check_loop():
+    """Background thread that periodically checks proxy health."""
+    import requests as _req
+
+    while not _proxy_check_stop.is_set():
+        try:
+            from autoteam import proxy_store
+
+            cfg = proxy_store.get_config()
+            interval = max(10, cfg.get("check_interval", 60))
+            proxies = cfg.get("proxies", [])
+            if not proxies:
+                _proxy_check_stop.wait(interval)
+                continue
+
+            updates = []
+            for px in proxies:
+                proxy_url = proxy_store.proxy_to_url(px)
+                status = "bad"
+                latency_ms = None
+                try:
+                    resp = _req.get(
+                        "http://ip-api.com/json/?fields=status",
+                        proxies={"http": proxy_url, "https": proxy_url},
+                        timeout=2.5,
+                    )
+                    latency_ms = resp.elapsed.total_seconds() * 1000
+                    if resp.status_code == 200:
+                        if latency_ms < 500:
+                            status = "good"
+                        else:
+                            status = "slow"
+                    else:
+                        status = "bad"
+                except Exception:
+                    status = "bad"
+                    latency_ms = None
+                updates.append(
+                    {
+                        "id": px["id"],
+                        "status": status,
+                        "latency_ms": round(latency_ms, 1) if latency_ms is not None else None,
+                        "last_check": time.time(),
+                    }
+                )
+            proxy_store.bulk_update_status(updates)
+        except Exception as exc:
+            logger.debug("[proxy] health check error: %s", exc)
+
+        try:
+            from autoteam import proxy_store as _ps2
+
+            interval = max(10, _ps2.get_config().get("check_interval", 60))
+        except Exception:
+            interval = 60
+        _proxy_check_stop.wait(interval)
+
+
+class ProxyConfig(BaseModel):
+    enabled: bool | None = None
+    check_interval: int | None = None
+
+
+class ProxyAddParams(BaseModel):
+    proxies: str
+
+
+@app.get("/api/proxy/config")
+def get_proxy_config():
+    from autoteam import proxy_store
+
+    return proxy_store.get_config()
+
+
+@app.put("/api/proxy/config")
+def put_proxy_config(params: ProxyConfig):
+    from autoteam import proxy_store
+
+    return proxy_store.set_config(enabled=params.enabled, check_interval=params.check_interval)
+
+
+@app.post("/api/proxy/add")
+def post_proxy_add(params: ProxyAddParams):
+    from autoteam import proxy_store
+
+    return proxy_store.add_proxies(params.proxies)
+
+
+@app.post("/api/proxy/delete-all")
+def delete_all_proxies():
+    from autoteam import proxy_store
+
+    count = proxy_store.delete_all_proxies()
+    return {"message": f"已删除 {count} 个代理", "deleted": count}
+
+
+@app.delete("/api/proxy/{proxy_id}")
+def delete_proxy(proxy_id: str):
+    from autoteam import proxy_store
+
+    if not proxy_store.delete_proxy(proxy_id):
+        raise HTTPException(status_code=404, detail="代理不存在")
+    return {"message": "已删除"}
+
+
+@app.post("/api/proxy/check")
+def post_proxy_check():
+    """Trigger an immediate proxy health check (runs in background)."""
+    return {"message": "健康检查已触发"}
 
 
 # ---------------------------------------------------------------------------
@@ -1600,6 +2157,9 @@ class _QuietAccessLog(logging.Filter):
         "/api/manual-account/status",
         "/api/auth/check",
         "/api/setup/status",
+        "/api/browser/status",
+        "/api/logs",
+        "/api/proxy/config",
     )
 
     def filter(self, record):

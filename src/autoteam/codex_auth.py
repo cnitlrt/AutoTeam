@@ -4,13 +4,15 @@ import base64
 import hashlib
 import json
 import logging
+import os
+import random
 import re
 import secrets
 import time
 import urllib.parse
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from patchright.sync_api import sync_playwright
 
 import autoteam.display  # noqa: F401
 from autoteam.admin_state import (
@@ -22,6 +24,11 @@ from autoteam.admin_state import (
     update_admin_state,
 )
 from autoteam.auth_storage import AUTH_DIR, ensure_auth_dir, ensure_auth_file_permissions
+from autoteam.browser import (
+    force_click_submit,
+    launch_stealth_context,
+    react_set_input_value,
+)
 from autoteam.textio import write_text
 
 logger = logging.getLogger(__name__)
@@ -139,6 +146,44 @@ def _write_auth_file(filepath, bundle):
     return str(filepath)
 
 
+def _submit_react_form(page, field, labels) -> bool:
+    """Three-stage submit for React-controlled forms:
+      1. Press Enter on the field — fires the native submit.
+      2. Playwright click via `_click_primary_auth_button`.
+      3. JS force-click that resets disabled/aria-disabled first.
+
+    Returns True as soon as the URL changes (submit accepted)."""
+    before = ""
+    try:
+        before = page.url
+    except Exception:
+        pass
+
+    def _url_changed(timeout_ms: int) -> bool:
+        try:
+            page.wait_for_function(
+                "before => window.location.href !== before",
+                arg=before,
+                timeout=timeout_ms,
+            )
+            return True
+        except Exception:
+            return False
+
+    try:
+        field.press("Enter")
+    except Exception:
+        pass
+    if _url_changed(2500):
+        return True
+    _click_primary_auth_button(page, field, labels)
+    if _url_changed(2500):
+        return True
+    logger.warning("[Codex] 表单提交未推进，尝试 JS 强制点击")
+    force_click_submit(page)
+    return _url_changed(3500)
+
+
 def _click_primary_auth_button(page, field, labels):
     """
     只点击当前输入框所在表单的主按钮，避免误点 Continue with Google/Apple/Microsoft。
@@ -248,6 +293,319 @@ def _wait_for_otp_submit_result(page, timeout=12):
     return "pending", None
 
 
+SCREENSHOT_DIR_PATH = Path("/app/data/screenshots")
+if not SCREENSHOT_DIR_PATH.exists():
+    SCREENSHOT_DIR_PATH = Path.cwd() / "screenshots"
+
+
+def _dump_phone_page_dom(page, step: int) -> None:
+    """Save the page HTML + a summary of visible inputs/buttons to
+    data/screenshots/codex_phone_step{N}.html|.txt so we can inspect the
+    real page structure after a live run."""
+    try:
+        SCREENSHOT_DIR_PATH.mkdir(parents=True, exist_ok=True)
+        html = page.content()
+        html_path = SCREENSHOT_DIR_PATH / f"codex_phone_step{step}.html"
+        html_path.write_text(html, encoding="utf-8")
+        # A compact summary of inputs + buttons so we don't need to grep the HTML.
+        summary = []
+        summary.append(f"URL: {page.url}")
+        summary.append(f"TITLE: {page.title()}")
+        try:
+            inputs = page.evaluate(
+                """() => Array.from(document.querySelectorAll('input,select,textarea')).map(el => ({
+                    tag: el.tagName.toLowerCase(),
+                    type: el.getAttribute('type') || '',
+                    name: el.getAttribute('name') || '',
+                    id: el.id || '',
+                    placeholder: el.getAttribute('placeholder') || '',
+                    autocomplete: el.getAttribute('autocomplete') || '',
+                    inputmode: el.getAttribute('inputmode') || '',
+                    visible: !!(el.offsetWidth || el.offsetHeight),
+                }))"""
+            )
+            summary.append("\nINPUTS:")
+            for i in inputs:
+                summary.append(f"  {i}")
+        except Exception as exc:
+            summary.append(f"inputs probe failed: {exc}")
+        try:
+            buttons = page.evaluate(
+                """() => Array.from(document.querySelectorAll('button,[role="button"],a')).map(el => ({
+                    tag: el.tagName.toLowerCase(),
+                    text: (el.innerText || '').trim().slice(0, 80),
+                    type: el.getAttribute('type') || '',
+                    id: el.id || '',
+                    disabled: el.disabled || false,
+                    visible: !!(el.offsetWidth || el.offsetHeight),
+                })).filter(b => b.visible && b.text)"""
+            )
+            summary.append("\nBUTTONS:")
+            for b in buttons:
+                summary.append(f"  {b}")
+        except Exception as exc:
+            summary.append(f"buttons probe failed: {exc}")
+        try:
+            body_text = page.inner_text("body")[:2000]
+            summary.append("\nBODY TEXT (first 2000 chars):")
+            summary.append(body_text)
+        except Exception:
+            pass
+        (SCREENSHOT_DIR_PATH / f"codex_phone_step{step}.txt").write_text("\n".join(summary), encoding="utf-8")
+        logger.info(
+            "[Codex] 已转储手机验证页 DOM: %s / .txt",
+            html_path.name,
+        )
+    except Exception as exc:
+        logger.warning("[Codex] DOM 转储失败: %s", exc)
+
+
+_PHONE_KEYWORDS = (
+    "phone number",
+    "verify your phone",
+    "verify your number",
+    "enter your phone",
+    "text message",
+    "sms",
+    "mobile number",
+    "手机号",
+    "手机号码",
+    "电话号码",
+    "短信验证",
+    "短信",
+)
+
+
+def _is_phone_verification_page(page) -> bool:
+    """Loose detection of OpenAI/Auth0 phone verification pages.
+
+    Combines (1) a visible tel input, (2) URL hint, and (3) page text
+    keywords. Any single hit is sufficient because the page layout varies.
+    """
+    try:
+        tel = page.locator('input[type="tel"], input[name="phone"], input[name="phoneNumber"]').first
+        if tel.is_visible(timeout=400):
+            return True
+    except Exception:
+        pass
+    try:
+        url = (page.url or "").lower()
+        for hint in ("phone", "sms", "verify"):
+            if hint in url and "email" not in url:
+                # Page text check to avoid false positives
+                try:
+                    txt = page.inner_text("body", timeout=500).lower()
+                    for kw in _PHONE_KEYWORDS:
+                        if kw in txt:
+                            return True
+                except Exception:
+                    pass
+                break
+    except Exception:
+        pass
+    try:
+        txt = page.inner_text("body", timeout=500).lower()
+        for kw in _PHONE_KEYWORDS:
+            if kw in txt:
+                # Require *either* the keyword + a tel-ish input nearby
+                try:
+                    any_input = page.locator(
+                        'input[type="tel"], input[inputmode="numeric"], input[inputmode="tel"]'
+                    ).first
+                    if any_input.is_visible(timeout=400):
+                        return True
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return False
+
+
+def _fill_phone_number(page, number: str) -> bool:
+    """Fill the phone input. Tries several selector strategies because
+    different providers render this very differently (Auth0, react-phone-
+    number-input, Stytch, custom).
+
+    On OpenAI's /add-phone page the visible input is from
+    react-phone-number-input with US pre-selected — it expects national-
+    format digits, not E.164. Stripping non-digits makes this work for
+    both national and E.164 payloads.
+    """
+    digits = "".join(c for c in number if c.isdigit())
+    selectors = [
+        "input#tel",  # OpenAI /add-phone (react-phone-number-input)
+        'input[autocomplete="tel"]',
+        'input[type="tel"]',
+        'input[name="phone"]',
+        'input[name="phoneNumber"]:not([type="hidden"])',
+        'input[id*="phone" i]:not([type="hidden"])',
+    ]
+    for sel in selectors:
+        try:
+            el = page.locator(sel).first
+            if el.is_visible(timeout=1500):
+                try:
+                    el.click()
+                    # Clear with keyboard to defeat framework-controlled inputs
+                    # that reject `.fill("")`.
+                    try:
+                        el.press("Control+A")
+                    except Exception:
+                        pass
+                    el.press("Delete")
+                except Exception:
+                    pass
+                el.type(digits, delay=random.randint(60, 150))
+                time.sleep(random.uniform(0.5, 1.0))
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _submit_phone_form(page) -> bool:
+    for sel in (
+        'button[type="submit"]',
+        'button:has-text("Send code")',
+        'button:has-text("Send")',
+        'button:has-text("Continue")',
+        'button:has-text("继续")',
+        'button:has-text("发送")',
+        'button:has-text("Verify")',
+    ):
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=1000):
+                btn.click()
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _wait_sms_code_input(page, timeout_ms: int = 45000):
+    """Wait for the SMS code input to appear after submitting the number."""
+    selectors = (
+        'input[autocomplete="one-time-code"]',
+        'input[name="code"]',
+        'input[name="otp"]',
+        'input[id*="code" i]',
+        'input[inputmode="numeric"]',
+        'input[type="tel"][maxlength="6"]',
+        'input[type="text"][maxlength="6"]',
+    )
+    deadline = time.time() + (timeout_ms / 1000.0)
+    while time.time() < deadline:
+        for sel in selectors:
+            try:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=500):
+                    return el
+            except Exception:
+                continue
+        time.sleep(0.5)
+    return None
+
+
+def _handle_phone_verification(page, email: str) -> bool:
+    """Rent a number, submit it, poll for SMS code, submit the code.
+
+    Returns True on success. On failure, cancels the rental and returns
+    False so the outer loop can try other handlers.
+    """
+    from autoteam.sms import (
+        SMSTimeout,
+        SMSUnavailable,
+        default_service,
+        get_provider_by_id,
+        get_sms_chain,
+    )
+
+    chain = get_sms_chain()
+    if not chain:
+        logger.error(
+            "[Codex] %s 需要手机号验证，但未配置 SMS 提供商（在 /sms 页添加一个）",
+            email,
+        )
+        return False
+
+    service = default_service()
+    try:
+        rental = chain.rent_number(service=service)
+    except SMSUnavailable as exc:
+        logger.error("[Codex] 全部提供商租号失败 (service=%s): %s", service, exc)
+        return False
+    except Exception as exc:
+        logger.exception("[Codex] 租号异常: %s", exc)
+        return False
+
+    originating = get_provider_by_id(rental.provider_id)
+    if originating is None:
+        logger.error("[Codex] 无法找回租号所属提供商 %s", rental.provider_id)
+        return False
+
+    try:
+        logger.info(
+            "[Codex] 使用号码 %s (id=%s, provider=%s) 进行手机验证",
+            rental.number,
+            rental.id,
+            originating.label,
+        )
+        if not _fill_phone_number(page, rental.number):
+            logger.error("[Codex] 未找到手机号输入框")
+            originating.cancel(rental.id)
+            return False
+        time.sleep(random.uniform(0.5, 1.2))
+        if not _submit_phone_form(page):
+            logger.error("[Codex] 未找到提交按钮")
+            originating.cancel(rental.id)
+            return False
+        time.sleep(3)
+
+        code_input = _wait_sms_code_input(page, timeout_ms=45000)
+        if code_input is None:
+            logger.error("[Codex] 提交号码后未出现验证码输入框")
+            try:
+                _dump_phone_page_dom(page, 99)  # dump post-submit state for diag
+                _screenshot(page, "codex_04_phone_after_submit_fail.png")
+            except Exception:
+                pass
+            originating.cancel(rental.id)
+            return False
+
+        logger.info("[Codex] 等待 %s 短信验证码...", rental.number)
+        try:
+            code = originating.poll_code(rental.id, timeout=300)
+        except SMSTimeout as exc:
+            logger.error("[Codex] 等待短信超时: %s", exc)
+            originating.cancel(rental.id)
+            return False
+        logger.info("[Codex] 已收到短信验证码")
+
+        try:
+            code_input.click()
+            code_input.fill("")
+        except Exception:
+            pass
+        code_input.type(str(code), delay=random.randint(80, 180))
+        time.sleep(random.uniform(0.4, 1.0))
+
+        # Some pages auto-submit once the 6 digits are in; others need a click.
+        if not _submit_phone_form(page):
+            logger.debug("[Codex] 未找到验证码提交按钮，依赖自动提交")
+
+        originating.mark_complete(rental.id)
+        logger.info("[Codex] 手机号验证完成")
+        return True
+    except Exception as exc:
+        logger.exception("[Codex] 处理手机验证异常: %s", exc)
+        try:
+            originating.cancel(rental.id)
+        except Exception:
+            pass
+        return False
+
+
 def login_codex_via_browser(email, password, mail_client=None):
     """
     通过 Playwright 自动完成 Codex OAuth 登录。
@@ -267,14 +625,7 @@ def login_codex_via_browser(email, password, mail_client=None):
     auth_code = None
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-        )
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-        )
+        context = launch_stealth_context(p, email=email)
 
         # === Step 0: 先登录 ChatGPT 并切换到 Team workspace ===
         # 登录前就注入 _account cookie，引导登录流程进入 Team workspace
@@ -432,16 +783,25 @@ def login_codex_via_browser(email, password, mail_client=None):
         # 关闭 ChatGPT 页面但保留 context
         _page.close()
 
-        # 通过监听请求来捕获 OAuth callback redirect
+        # 通过监听请求来捕获 OAuth callback redirect。
+        # request + response + URL-poll 都能触发捕获；用标志位去重日志。
+        captured_logged = [False]
+
+        def _note_capture(where: str):
+            if not captured_logged[0]:
+                logger.info("[Codex] 捕获到 auth code! (%s)", where)
+                captured_logged[0] = True
+
         def on_request(request):
             nonlocal auth_code
             url = request.url
             if f"localhost:{CODEX_CALLBACK_PORT}/auth/callback" in url:
                 parsed = urllib.parse.urlparse(url)
                 qs = urllib.parse.parse_qs(parsed.query)
-                auth_code = qs.get("code", [None])[0]
-                if auth_code:
-                    logger.info("[Codex] 捕获到 auth code!")
+                code = qs.get("code", [None])[0]
+                if code:
+                    auth_code = code
+                    _note_capture("request")
 
         # 也监听 response/framenavigated 来捕获 redirect URL
         def on_response(response):
@@ -450,9 +810,10 @@ def login_codex_via_browser(email, password, mail_client=None):
             if f"localhost:{CODEX_CALLBACK_PORT}/auth/callback" in url and not auth_code:
                 parsed = urllib.parse.urlparse(url)
                 qs = urllib.parse.parse_qs(parsed.query)
-                auth_code = qs.get("code", [None])[0]
-                if auth_code:
-                    logger.info("[Codex] 从 response 捕获到 auth code!")
+                code = qs.get("code", [None])[0]
+                if code:
+                    auth_code = code
+                    _note_capture("response")
 
         page = context.new_page()
         page.on("request", on_request)
@@ -726,9 +1087,13 @@ def login_codex_via_browser(email, password, mail_client=None):
                 if pwd_field.is_visible(timeout=2000):
                     if password:
                         logger.info("[Codex] 需要重新输入密码 (step %d)...", step + 1)
-                        pwd_field.fill(password)
+                        try:
+                            pwd_field.click()
+                        except Exception:
+                            pass
+                        react_set_input_value(pwd_field, password)
                         time.sleep(0.5)
-                        _click_primary_auth_button(page, pwd_field, ["Continue", "继续", "Log in"])
+                        _submit_react_form(page, pwd_field, ["Continue", "继续", "Log in"])
                     else:
                         # 没密码，点"使用一次性验证码登录"
                         otp_btn = page.locator(
@@ -793,7 +1158,11 @@ def login_codex_via_browser(email, password, mail_client=None):
                                 submit_ok = True
                                 break
 
-                            otp_input.fill(otp)
+                            try:
+                                otp_input.click()
+                            except Exception:
+                                pass
+                            react_set_input_value(otp_input, otp)
                             time.sleep(0.5)
                             page.locator(
                                 'button[type="submit"], button:has-text("Continue"), button:has-text("继续")'
@@ -839,6 +1208,29 @@ def login_codex_via_browser(email, password, mail_client=None):
             except Exception:
                 pass
 
+            # 处理手机号验证页面 (SMS 提供商租号、提交、轮询验证码)
+            try:
+                if _is_phone_verification_page(page):
+                    logger.info("[Codex] 检测到手机号验证页面 (step %d)", step + 1)
+                    _screenshot(page, f"codex_04_phone_{step + 1}_before.png")
+                    _dump_phone_page_dom(page, step + 1)
+                    # 支持通过环境变量在首次检测时暂停，便于人工观察页面结构
+                    if os.environ.get("CODEX_PHONE_OBSERVE", "").strip():
+                        pause_seconds = int(os.environ.get("CODEX_PHONE_OBSERVE_SECS", "600"))
+                        logger.warning(
+                            "[Codex] CODEX_PHONE_OBSERVE 开启，暂停 %ds 以便通过 VNC 观察和交互",
+                            pause_seconds,
+                        )
+                        time.sleep(pause_seconds)
+                        continue
+                    if _handle_phone_verification(page, email):
+                        _screenshot(page, f"codex_04_phone_{step + 1}_after.png")
+                        time.sleep(3)
+                        continue
+                    _screenshot(page, f"codex_04_phone_{step + 1}_failed.png")
+            except Exception as exc:
+                logger.warning("[Codex] 手机号验证处理异常 (step %d): %s", step + 1, exc)
+
             try:
                 consent_btn = page.locator(
                     'button:has-text("继续"), button:has-text("Continue"), button:has-text("Allow")'
@@ -846,7 +1238,14 @@ def login_codex_via_browser(email, password, mail_client=None):
                 if consent_btn.is_visible(timeout=5000):
                     logger.info("[Codex] 点击同意/继续按钮 (step %d)...", step + 1)
                     consent_btn.click()
-                    time.sleep(5)
+                    # Interruptible sleep — break as soon as auth_code arrives
+                    # (avoids eating 5s of fixed wait after the redirect fires).
+                    for _ in range(10):
+                        if auth_code:
+                            break
+                        time.sleep(0.5)
+                    if auth_code:
+                        break
                     _screenshot(page, f"codex_04_consent_{step + 1}.png")
                 else:
                     break
@@ -863,9 +1262,10 @@ def login_codex_via_browser(email, password, mail_client=None):
                 if f"localhost:{CODEX_CALLBACK_PORT}/auth/callback" in cur:
                     parsed = urllib.parse.urlparse(cur)
                     qs = urllib.parse.parse_qs(parsed.query)
-                    auth_code = qs.get("code", [None])[0]
-                    if auth_code:
-                        logger.info("[Codex] 从 URL 捕获到 auth code!")
+                    code = qs.get("code", [None])[0]
+                    if code:
+                        auth_code = code
+                        _note_capture("url-poll")
                         break
             except Exception:
                 pass
@@ -875,7 +1275,7 @@ def login_codex_via_browser(email, password, mail_client=None):
             _screenshot(page, "codex_05_no_callback.png")
             logger.warning("[Codex] 未获取到 auth code，当前 URL: %s", page.url)
 
-        browser.close()
+        context.close()
 
     if not auth_code:
         logger.error("[Codex] OAuth 登录失败: 未获取到 authorization code")

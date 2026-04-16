@@ -6,6 +6,7 @@ import { api, setApiKey } from "@/lib/api";
 import { useAuth } from "@/components/providers/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -127,13 +128,22 @@ function FieldRow({
         </Label>
         <span className="text-[10px] text-muted-foreground font-mono">{field.key}</span>
       </div>
-      <Input
-        type={isSecret ? "password" : "text"}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={field.default || ""}
-        required={!field.optional}
-      />
+      {isSecret ? (
+        <PasswordInput
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={field.default || ""}
+          required={!field.optional}
+        />
+      ) : (
+        <Input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={field.default || ""}
+          required={!field.optional}
+        />
+      )}
     </div>
   );
 }
