@@ -746,6 +746,9 @@ from autoteam.browser import (
 from autoteam.browser import (
     react_set_input_value as _react_set_input_value,
 )
+from autoteam.browser import (
+    submit_via_enter_then_click as _submit_via_enter_then_click,
+)
 
 
 def _first_visible_editable_locator(page, selectors, timeout=800):
@@ -1294,7 +1297,6 @@ def _register_direct_once(mail_client, email, password):
 
             if verification_code:
                 logger.info("[直接注册] 输入验证码: %s", verification_code)
-                before_url = page.url
                 try:
                     code_input.click()
                 except Exception:
@@ -1304,21 +1306,14 @@ def _register_direct_once(mail_client, email, password):
                 time.sleep(0.6)
                 btn_state = _describe_submit_button(page)
                 logger.info("[直接注册] 验证码提交前按钮状态: %s", btn_state)
-                # Submit via keyboard Enter (cheapest)
-                try:
-                    code_input.press("Enter")
-                except Exception:
-                    pass
-                time.sleep(2)
-                if page.url == before_url:
-                    # Still not navigating — click via Playwright
-                    _click_primary_auth_button(page, code_input, ["Continue", "继续"])
-                    time.sleep(2)
-                if page.url == before_url:
-                    # Still stuck — JS force-click that clears disabled flags
-                    logger.warning("[直接注册] Continue 未响应，JS 强制点击")
-                    _force_click_submit(page)
-                    time.sleep(3)
+                # Three-stage submit (Enter → click → JS force-click), each
+                # stage waits up to 3s for URL change and exits early. This
+                # replaces fixed 2s+2s+3s sleeps with actual navigation
+                # detection — saves up to 6s when navigation is fast.
+                if not _submit_via_enter_then_click(
+                    page, code_input, click_button_labels=["Continue", "继续"]
+                ):
+                    logger.warning("[直接注册] 验证码提交后页面未跳转")
                 # Allow OpenAI's navigation to settle
                 try:
                     page.wait_for_load_state("networkidle", timeout=8000)
