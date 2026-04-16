@@ -2,7 +2,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { RefreshCw, UserX } from "lucide-react";
 import { api } from "@/lib/api";
-import { usePolling } from "@/lib/hooks";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -36,8 +35,25 @@ function roleLabel(role: string) {
 }
 
 export default function TeamPage() {
-  const { data, loading, error, refresh } = usePolling(api.getTeamMembers, 60000);
+  // No auto-polling — fetching team members launches a full browser session
+  // (Playwright lock), so only fetch on explicit user action.
+  const [data, setData] = useState<{ members: TeamMember[]; total: number; invites: number } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+
+  async function refresh() {
+    setLoading(true);
+    setError(null);
+    try {
+      const d = await api.getTeamMembers();
+      setData(d);
+    } catch (e) {
+      setError(e as Error);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   async function remove(m: TeamMember) {
     const label = m.type === "invite" ? "取消邀请" : "移除";
@@ -152,6 +168,13 @@ export default function TeamPage() {
             <TableRow>
               <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
                 暂无成员
+              </TableCell>
+            </TableRow>
+          )}
+          {!data && !loading && (
+            <TableRow>
+              <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
+                点击「刷新」加载 Team 成员列表（需要启动浏览器会话）
               </TableCell>
             </TableRow>
           )}
