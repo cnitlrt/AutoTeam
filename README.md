@@ -10,7 +10,7 @@
 [![Playwright](https://img.shields.io/badge/Playwright-Chromium-2EAD33?style=for-the-badge&logo=playwright&logoColor=white)](https://playwright.dev)
 [![uv](https://img.shields.io/badge/uv-Package_Manager-DE5FE9?style=for-the-badge)](https://docs.astral.sh/uv/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-API_&_Web-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![Vue](https://img.shields.io/badge/Vue_3-Frontend-4FC08D?style=for-the-badge&logo=vue.js&logoColor=white)](https://vuejs.org)
+[![Next.js](https://img.shields.io/badge/Next.js_15-Frontend-000000?style=for-the-badge&logo=nextdotjs&logoColor=white)](https://nextjs.org)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 
@@ -24,12 +24,16 @@
 
 | | 功能 | 描述 |
 |---|---|---|
-| 📧 | **自动注册** | CloudMail 临时邮箱 + Playwright 自动注册 |
-| 🔐 | **Codex OAuth** | 自动登录 Codex，无密码时可走邮箱验证码 |
+| 📧 | **自动注册** | CloudMail 临时邮箱 + 邀请式直接注册（自动加入 Team） |
+| 🛡️ | **隐身浏览器** | patchright + 系统 Chrome + 持久化 profile + stealth 注入，低 Cloudflare 拦截率 |
+| 🔐 | **Codex OAuth** | 自动登录 Codex，无密码时可走邮箱验证码；手机验证可走 SMS 提供商 |
+| 🌐 | **代理池** | 批量导入住宅代理、定时健康检查、按颜色显示延迟，启用后所有任务自动走代理 |
+| 📱 | **多 SMS 提供商** | 内置 getatext.com、smspool.net；按优先级顺序自动 fallback，控制台显示 ChatGPT 价格与余额 |
 | 🔑 | **手动 OAuth 导入** | 支持 localhost 自动回调，也支持手动粘贴回调 URL |
 | 🔄 | **智能轮转** | 额度不足自动移出，旧号恢复后优先复用 |
 | ☁️ | **CPA 双向同步** | 本地 active 上传到 CPA，也可从 CPA 反向导入 |
-| 🖥️ | **Web 面板** | 仪表盘、同步中心、OAuth 登录、任务历史、日志、设置 |
+| 🖥️ | **Web 面板** | Next.js 15 + shadcn/ui 仪表盘，含浅色模式切换、密码显示切换 |
+| 📺 | **VNC 实时观看** | 日志页内嵌只读 VNC，看着浏览器自动操作 |
 | 🔍 | **自动巡检** | 后台定时检查额度并触发轮转 |
 | 📤 | **导出认证** | 一键导出 Codex CLI 格式 auth.json，直连 OpenAI 不走代理 |
 | 🐳 | **Docker** | 支持容器部署与数据持久化 |
@@ -100,12 +104,14 @@ docker compose up -d
 | 页面 | 功能 |
 |------|------|
 | 📊 仪表盘 | 账号统计 + 状态表格 + 登录/移出/删除/同步操作 |
-| 👥 Team 成员 | 全部 Team 成员（含外部成员） |
+| 👥 Team 成员 | 全部 Team 成员（含外部成员），按需手动刷新（拉取需启动浏览器） |
 | 🔁 账号池操作 | 轮转、检查、补满、添加、清理等会直接改变账号池状态的操作 |
 | 🔄 同步中心 | 同步账号、同步 CPA、拉取 CPA 等对账/同步动作 |
 | 🔐 OAuth 登录 | 生成认证链接；优先自动接收 localhost 回调，失败时也可手动粘贴回调 URL |
-| 📜 任务历史 | 查看后台任务执行状态、参数、耗时与结果 |
-| 📋 日志 | 实时日志查看器 |
+| 📱 SMS | 多提供商管理（getatext / smspool）+ 优先级排序 + ChatGPT 价格与余额展示 + API Key 在线编辑 |
+| 🌐 代理 | 批量导入代理（每行 `IP:端口:用户:密码`）+ 定时健康检查（绿/黄/红）+ 启用开关 |
+| 📜 任务历史 | 查看后台任务执行状态、参数、耗时与结果，支持取消运行中任务 |
+| 📋 日志 | 实时日志 + 内嵌只读 VNC，可观看浏览器实时操作 |
 | ⚙️ 设置 | 管理员登录 + 主号 Codex 同步 + 巡检配置 |
 
 ## 文档
@@ -127,9 +133,11 @@ docker compose up -d
 
 ## 已知限制
 
-- **IP 风险** — VPS 的 IP 容易被 OpenAI/Cloudflare 标记，建议使用住宅代理
-- **并发限制** — 同一时间只允许一个 Playwright 操作
-- **验证码** — OpenAI 验证码有效期短，网络延迟可能导致过期
+- **IP 风险** — VPS 的 IP 容易被 OpenAI/Cloudflare 标记，强烈建议在「代理」页配置住宅代理池
+- **并发限制** — 同一时间只允许一个 Playwright 操作（由全局锁保护，前端会显示当前持有者）
+- **验证码** — OpenAI 邮箱验证码有效期短，代理网络延迟过高可能导致过期
+- **手机验证** — 较新或可疑账号可能要求 SMS 验证；需在「SMS」页配置至少一个提供商作为兜底
+- **/team/ 页面** — 拉取 Team 成员需启动浏览器会话，因此默认不自动轮询，需手动点击刷新
 
 更多详见 [常见问题](docs/troubleshooting.md)
 
