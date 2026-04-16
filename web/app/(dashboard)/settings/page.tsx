@@ -1,8 +1,8 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Loader2, LogOut, Save, ShieldCheck, UserCircle } from "lucide-react";
-import { api } from "@/lib/api";
+import { Database, Download, Loader2, LogOut, Save, ShieldCheck, Upload, UserCircle } from "lucide-react";
+import { api, getApiKey, setApiKey } from "@/lib/api";
 import { usePolling } from "@/lib/hooks";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -30,7 +30,89 @@ export default function SettingsPage() {
       <AdminCard status={admin} refresh={refreshAdmin} />
       {admin?.configured && <MainCodexCard status={codex} refresh={refreshCodex} />}
       <AutoCheckCard />
+      <BackupCard />
     </div>
+  );
+}
+
+function BackupCard() {
+  const [importing, setImporting] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  function downloadBackup() {
+    const key = getApiKey();
+    const url = `/api/backup/export${key ? `?key=${encodeURIComponent(key)}` : ""}`;
+    // Use a hidden anchor to trigger the browser download (preserves the
+    // server-suggested filename via Content-Disposition).
+    const a = document.createElement("a");
+    a.href = url;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    toast.success("正在下载备份");
+  }
+
+  async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!confirm(`确定要从 ${file.name} 导入备份？将覆盖当前所有账号、配置、SMS、代理与 auth 文件。`)) {
+      e.target.value = "";
+      return;
+    }
+    setImporting(true);
+    try {
+      const text = await file.text();
+      const bundle = JSON.parse(text);
+      const r = await api.importBackup(bundle);
+      if (r.api_key) setApiKey(r.api_key);
+      const c = r.imported;
+      toast.success(
+        `导入完成 — env ${c.env_keys}, 账号 ${c.accounts}, SMS ${c.sms_providers}, 代理 ${c.proxies}, auth ${c.auth_files}`,
+      );
+      // Reload so all polling hooks pick up the new state
+      setTimeout(() => window.location.reload(), 1500);
+    } catch (err) {
+      toast.error(`导入失败：${(err as Error).message}`);
+    } finally {
+      setImporting(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
+  return (
+    <Card className="p-5">
+      <div className="mb-4">
+        <div className="font-semibold flex items-center gap-2">
+          <Database className="h-4 w-4" /> 备份 / 迁移
+        </div>
+        <p className="text-xs text-muted-foreground mt-1">
+          一键导出全部状态（.env、账号、SMS、代理、auth 文件）为单个 JSON。
+          在新服务器的首次配置页或本页可上传该 JSON 完成迁移。
+        </p>
+      </div>
+      <div className="flex flex-col sm:flex-row gap-2">
+        <Button variant="subtle" onClick={downloadBackup}>
+          <Download className="h-3.5 w-3.5" /> 导出备份
+        </Button>
+        <Button variant="subtle" disabled={importing} onClick={() => fileRef.current?.click()}>
+          {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+          导入备份
+        </Button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="application/json,.json"
+          onChange={handleFile}
+          className="hidden"
+        />
+      </div>
+      <Alert variant="warning" className="mt-3">
+        <AlertDescription className="text-xs">
+          导入会<strong>完全覆盖</strong>当前实例的所有配置与账号数据，请先导出本地备份再操作。
+        </AlertDescription>
+      </Alert>
+    </Card>
   );
 }
 

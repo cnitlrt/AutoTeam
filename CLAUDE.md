@@ -74,6 +74,7 @@ External integrations: OpenAI ChatGPT Team (Playwright + system Chrome), CloudMa
 
 - Ruff lint set: E/W/F/I/UP/B; ignores E501, E402, B008, B904, B905. First-party package: `autoteam`. Pre-commit hook auto-fixes and fails on changes.
 - Persistent artifacts live at repo root (or `/app/data` in Docker): `accounts.json`, `state.json`, `sms_providers.json`, `proxies.json`, `auths/`, `screenshots/` (Playwright debug dumps), `profiles/` (per-account Chrome data dirs).
+- Backup/restore (`/api/backup/export`, `/api/backup/import`, `/api/setup/import`) bundles all of the above except `profiles/`, `screenshots/`, and `recordings/` into a single JSON. Setup-time import is exempt from auth (in `_AUTH_SKIP_PATHS`) so a fresh instance can bootstrap from a backup file before an API key is set.
 - Linux runs headless via Xvfb — never call Playwright before `display.py` has initialized.
 - Frontend API client stores key in `localStorage['autoteam_api_key']`; backend accepts `Authorization: Bearer` or `?key=`. WebSocket endpoints (VNC) only accept `?key=` since browsers can't set headers on WS.
 - The Playwright lock holder is recorded in `_lock_holder` so contention errors report what's running. A failed task always releases the lock in a `finally` — never amend that flow with destructive shortcuts (e.g. forced unlock) without preserving holder bookkeeping.

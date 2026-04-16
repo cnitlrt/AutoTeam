@@ -216,6 +216,20 @@ export const api = {
       `/sms/rentals/${encodeURIComponent(id)}?provider_id=${encodeURIComponent(providerId)}`,
     ),
 
+  importBackup: (bundle: unknown) =>
+    request<{ message: string; imported: Record<string, number>; api_key: string | null }>(
+      "POST",
+      "/backup/import",
+      bundle,
+    ),
+  setupImportBackup: (bundle: unknown) =>
+    request<{
+      message: string;
+      configured: boolean;
+      imported: Record<string, number>;
+      api_key: string | null;
+    }>("POST", "/setup/import", bundle),
+
   getProxyConfig: () => request<ProxyConfig>("GET", "/proxy/config"),
   setProxyConfig: (params: { enabled?: boolean; check_interval?: number }) =>
     request<{ enabled: boolean; check_interval: number }>("PUT", "/proxy/config", params),

@@ -1,7 +1,7 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Rocket, Sparkles } from "lucide-react";
+import { Loader2, Rocket, Sparkles, Upload } from "lucide-react";
 import { api, setApiKey } from "@/lib/api";
 import { useAuth } from "@/components/providers/auth-provider";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { SetupField, SetupStatus } from "@/lib/types";
 import { toast } from "@/components/ui/sonner";
@@ -19,7 +20,9 @@ export default function SetupPage() {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     api
@@ -46,6 +49,29 @@ export default function SetupPage() {
       setError((e as Error).message);
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function importBackup(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImporting(true);
+    setError(null);
+    try {
+      const text = await file.text();
+      const bundle = JSON.parse(text);
+      const r = await api.setupImportBackup(bundle);
+      if (r.api_key) setApiKey(r.api_key);
+      const c = r.imported;
+      toast.success(
+        `已从备份恢复 — env ${c.env_keys}, 账号 ${c.accounts}, SMS ${c.sms_providers}, 代理 ${c.proxies}, auth ${c.auth_files}`,
+      );
+      await refresh();
+    } catch (err) {
+      setError(`导入失败：${(err as Error).message}`);
+    } finally {
+      setImporting(false);
+      if (fileRef.current) fileRef.current.value = "";
     }
   }
 
@@ -97,11 +123,41 @@ export default function SetupPage() {
                   <Sparkles className="h-3 w-3" />
                   留空 API_KEY 系统会自动生成
                 </p>
-                <Button type="submit" disabled={submitting}>
+                <Button type="submit" disabled={submitting || importing}>
                   {submitting ? "保存中..." : "保存并进入"}
                 </Button>
               </div>
             </form>
+
+            <div className="my-6 flex items-center gap-3">
+              <Separator className="flex-1" />
+              <span className="text-xs text-muted-foreground">或</span>
+              <Separator className="flex-1" />
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-sm">从备份恢复</Label>
+              <p className="text-xs text-muted-foreground">
+                上传旧实例导出的 <code className="font-mono">autoteam-backup-*.json</code>，
+                自动恢复配置、账号、SMS、代理与 auth 文件。
+              </p>
+              <Button
+                type="button"
+                variant="subtle"
+                disabled={submitting || importing}
+                onClick={() => fileRef.current?.click()}
+              >
+                {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+                选择备份文件
+              </Button>
+              <input
+                ref={fileRef}
+                type="file"
+                accept="application/json,.json"
+                onChange={importBackup}
+                className="hidden"
+              />
+            </div>
           </CardContent>
         </Card>
       </motion.div>

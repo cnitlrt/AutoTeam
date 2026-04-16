@@ -29,7 +29,7 @@ app = FastAPI(
 # API Key 鉴权中间件
 # ---------------------------------------------------------------------------
 
-_AUTH_SKIP_PATHS = {"/api/auth/check", "/api/setup/status", "/api/setup/save"}
+_AUTH_SKIP_PATHS = {"/api/auth/check", "/api/setup/status", "/api/setup/save", "/api/setup/import"}
 
 
 @app.middleware("http")
@@ -2093,6 +2093,208 @@ def delete_proxy(proxy_id: str):
 def post_proxy_check():
     """Trigger an immediate proxy health check (runs in background)."""
     return {"message": "健康检查已触发"}
+
+
+# ---------------------------------------------------------------------------
+# Backup / restore (full migration bundle)
+# ---------------------------------------------------------------------------
+
+
+BACKUP_VERSION = "1.0"
+
+
+def _data_root() -> Path:
+    docker_data = Path("/app/data")
+    if docker_data.exists():
+        return docker_data
+    from autoteam.config import PROJECT_ROOT
+
+    return Path(PROJECT_ROOT)
+
+
+def _build_backup_bundle() -> dict:
+    """Collect every persistent piece of state into a single dict."""
+    from autoteam.textio import parse_env_line
+
+    root = _data_root()
+    bundle: dict = {
+        "version": BACKUP_VERSION,
+        "exported_at": int(time.time()),
+        "env": {},
+        "accounts": [],
+        "admin_state": {},
+        "sms_providers": {"providers": []},
+        "proxies": {"enabled": False, "check_interval": 60, "proxies": []},
+        "auths": {},
+    }
+
+    # .env
+    env_file = root / ".env"
+    if env_file.exists():
+        try:
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                parsed = parse_env_line(line)
+                if parsed:
+                    bundle["env"][parsed[0]] = parsed[1]
+        except Exception as exc:
+            logger.warning("[backup] 读取 .env 失败: %s", exc)
+
+    # JSON state files
+    for key, fname in (
+        ("accounts", "accounts.json"),
+        ("admin_state", "state.json"),
+        ("sms_providers", "sms_providers.json"),
+        ("proxies", "proxies.json"),
+    ):
+        fpath = root / fname
+        if fpath.exists():
+            try:
+                bundle[key] = json.loads(fpath.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning("[backup] 读取 %s 失败: %s", fname, exc)
+
+    # Codex auth files
+    auths_dir = root / "auths"
+    if auths_dir.exists():
+        for f in auths_dir.glob("*.json"):
+            try:
+                bundle["auths"][f.name] = json.loads(f.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning("[backup] 读取 %s 失败: %s", f.name, exc)
+
+    return bundle
+
+
+def _safe_filename(name: str) -> bool:
+    """Reject anything that could escape the auths directory."""
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return False
+    return name.endswith(".json")
+
+
+def _apply_backup_bundle(bundle: dict) -> dict:
+    """Write everything in `bundle` to disk and reload runtime config.
+
+    Overwrites existing files. Returns a per-section count of imported items.
+    """
+    if not isinstance(bundle, dict):
+        raise HTTPException(status_code=400, detail="备份格式错误：根对象不是 JSON object")
+    if "version" not in bundle:
+        raise HTTPException(status_code=400, detail="备份格式错误：缺少 version 字段")
+
+    root = _data_root()
+    root.mkdir(parents=True, exist_ok=True)
+
+    counts = {"env_keys": 0, "accounts": 0, "sms_providers": 0, "proxies": 0, "auth_files": 0}
+
+    # .env — write k=v lines, then push into os.environ for current process
+    env = bundle.get("env") or {}
+    if isinstance(env, dict) and env:
+        lines = [f"{k}={v}" for k, v in env.items() if v is not None]
+        (root / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        for k, v in env.items():
+            if v is not None:
+                os.environ[k] = str(v)
+        counts["env_keys"] = len(env)
+
+    # JSON state files
+    for key, fname in (
+        ("accounts", "accounts.json"),
+        ("admin_state", "state.json"),
+        ("sms_providers", "sms_providers.json"),
+        ("proxies", "proxies.json"),
+    ):
+        if key in bundle and bundle[key] is not None:
+            (root / fname).write_text(
+                json.dumps(bundle[key], indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+
+    if isinstance(bundle.get("accounts"), list):
+        counts["accounts"] = len(bundle["accounts"])
+    sms = bundle.get("sms_providers") or {}
+    if isinstance(sms, dict) and isinstance(sms.get("providers"), list):
+        counts["sms_providers"] = len(sms["providers"])
+    proxies = bundle.get("proxies") or {}
+    if isinstance(proxies, dict) and isinstance(proxies.get("proxies"), list):
+        counts["proxies"] = len(proxies["proxies"])
+
+    # Auth files — written into auths/ (path-traversal protected)
+    auths = bundle.get("auths") or {}
+    if isinstance(auths, dict):
+        auths_dir = root / "auths"
+        auths_dir.mkdir(parents=True, exist_ok=True)
+        for fname, data in auths.items():
+            if not _safe_filename(fname):
+                logger.warning("[backup] 跳过非法 auth 文件名: %s", fname)
+                continue
+            try:
+                (auths_dir / fname).write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+                counts["auth_files"] += 1
+            except Exception as exc:
+                logger.warning("[backup] 写入 %s 失败: %s", fname, exc)
+
+    # Reload runtime config so the new env is picked up immediately
+    try:
+        import importlib
+
+        import autoteam.config as _cfg
+
+        importlib.reload(_cfg)
+    except Exception as exc:
+        logger.warning("[backup] reload config 失败: %s", exc)
+
+    # Update runtime API_KEY so subsequent requests use the imported key
+    global API_KEY
+    new_key = (env.get("API_KEY") if isinstance(env, dict) else None) or os.environ.get("API_KEY", "")
+    API_KEY = new_key
+
+    return counts
+
+
+@app.get("/api/backup/export")
+def export_backup():
+    """Download the full configuration + state as a single JSON file."""
+    from fastapi.responses import Response
+
+    bundle = _build_backup_bundle()
+    payload = json.dumps(bundle, indent=2, ensure_ascii=False)
+    fname = f"autoteam-backup-{int(time.time())}.json"
+    return Response(
+        content=payload,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.post("/api/backup/import")
+async def import_backup(request: Request):
+    """Restore from a backup bundle. Auth-protected; for use after the
+    instance is already configured."""
+    try:
+        bundle = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="无法解析 JSON 备份")
+    counts = _apply_backup_bundle(bundle)
+    return {"message": "备份导入完成", "imported": counts, "api_key": API_KEY or None}
+
+
+@app.post("/api/setup/import")
+async def setup_import_backup(request: Request):
+    """Setup-time variant: no auth required (setup endpoints are exempt).
+    Returns the imported API_KEY so the frontend can save it and continue."""
+    try:
+        bundle = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="无法解析 JSON 备份")
+    counts = _apply_backup_bundle(bundle)
+    return {
+        "message": "配置已从备份导入",
+        "configured": True,
+        "imported": counts,
+        "api_key": API_KEY or None,
+    }
 
 
 # ---------------------------------------------------------------------------
