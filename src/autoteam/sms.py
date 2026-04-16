@@ -379,21 +379,50 @@ class SMSPoolProvider:
         try:
             r = self.session.post(f"{self.BASE}/service/retrieve_all", data={}, timeout=15)
             services = r.json()
-            if isinstance(services, list):
-                return [
-                    {
-                        "service_name": s.get("name", ""),
-                        "api_name": str(s.get("ID") or s.get("id", "")),
-                        "price": s.get("price", "-"),
-                        "stock": None,
-                        "ttl": None,
-                        "multiple_sms": False,
-                    }
-                    for s in services
-                ]
         except Exception as exc:
             logger.warning("[SMS/%s] 获取服务列表失败: %s", self.label, exc)
-        return []
+            return []
+        if not isinstance(services, list):
+            return []
+
+        # Fetch the bulk pricing matrix and build a per-service "cheapest US
+        # price" lookup. SMSPool's service list endpoint doesn't include
+        # prices; /request/pricing returns rows for every (service, country,
+        # pool) combination.
+        cheapest_us: dict[str, float] = {}
+        try:
+            r2 = self.session.post(f"{self.BASE}/request/pricing", data={"key": self.api_key}, timeout=20)
+            pricing = r2.json()
+            if isinstance(pricing, list):
+                for row in pricing:
+                    sid = str(row.get("service") or "")
+                    if not sid:
+                        continue
+                    # Country 1 = United States
+                    if str(row.get("country")) != "1":
+                        continue
+                    try:
+                        price = float(row.get("price") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if price <= 0:
+                        continue
+                    if sid not in cheapest_us or price < cheapest_us[sid]:
+                        cheapest_us[sid] = price
+        except Exception as exc:
+            logger.debug("[SMS/%s] 获取 pricing 失败: %s", self.label, exc)
+
+        return [
+            {
+                "service_name": s.get("name", ""),
+                "api_name": str(s.get("ID") or s.get("id", "")),
+                "price": cheapest_us.get(str(s.get("ID") or s.get("id", "")), "-"),
+                "stock": None,
+                "ttl": None,
+                "multiple_sms": False,
+            }
+            for s in services
+        ]
 
 
 # ---------------------------------------------------------------------------
