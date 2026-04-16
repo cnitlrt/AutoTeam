@@ -72,8 +72,57 @@ class CloudMailClient:
         logger.info("[CloudMail] 临时邮箱已创建: %s (accountId=%s)", email, account_id)
         return account_id, email
 
-    def search_emails_by_recipient(self, to_email, size=10):
-        """通过 admin API 按收件人搜索所有邮件（不受 accountId 限制）"""
+    @staticmethod
+    def _normalize_email(value):
+        return str(value or "").strip().lower()
+
+    def _resolve_account_id_for_email(self, to_email):
+        """优先从本地账号池解析 CloudMail accountId。"""
+        target = self._normalize_email(to_email)
+        if not target:
+            return None
+
+        try:
+            from autoteam.accounts import load_accounts
+
+            for acc in load_accounts():
+                if self._normalize_email(acc.get("email")) == target:
+                    account_id = acc.get("cloudmail_account_id")
+                    if account_id:
+                        return account_id
+        except Exception:
+            pass
+        return None
+
+    def _filter_recipient_matches(self, emails, to_email):
+        """尽量过滤出真正属于目标收件箱的邮件。"""
+        target = self._normalize_email(to_email)
+        if not target:
+            return emails
+
+        filtered = []
+        for em in emails:
+            candidates = (
+                em.get("accountEmail"),
+                em.get("receiveEmail"),
+                em.get("toEmail"),
+                em.get("mailAddress"),
+                em.get("email"),
+            )
+            candidate_values = [self._normalize_email(item) for item in candidates if item]
+            if candidate_values and target not in candidate_values:
+                continue
+            filtered.append(em)
+        return filtered
+
+    def search_emails_by_recipient(self, to_email, size=10, account_id=None):
+        """优先读取该邮箱自己的收件箱；无法定位 accountId 时再回退到 admin 全局搜索。"""
+        resolved_account_id = account_id or self._resolve_account_id_for_email(to_email)
+        if resolved_account_id:
+            emails = self.list_emails(resolved_account_id, size=size)
+            if emails:
+                return emails
+
         resp = self._get(
             "/allEmail/list",
             {
@@ -85,7 +134,9 @@ class CloudMailClient:
         )
         if resp["code"] != 200:
             return []
-        return resp["data"].get("list", [])
+        emails = resp["data"].get("list", [])
+        filtered = self._filter_recipient_matches(emails, to_email)
+        return filtered or emails
 
     def list_emails(self, account_id, size=10):
         """获取指定账户的收件列表"""
