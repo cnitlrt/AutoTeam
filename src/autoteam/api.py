@@ -1602,44 +1602,59 @@ _auto_check_stop = threading.Event()
 _auto_check_restart = threading.Event()  # 配置变更时通知线程重启
 
 
-def _auto_check_team_member_count(timeout_seconds=45):
+def _auto_check_team_member_count(timeout_seconds=20, retries=3):
     """查询 Team 实际成员数，供自动巡检的人数兜底判断使用。"""
-    result_holder: dict[str, object] = {}
-    done = threading.Event()
+    for attempt in range(1, max(1, retries) + 1):
+        result_holder: dict[str, object] = {}
+        done = threading.Event()
 
-    def _worker():
-        chatgpt = None
-        try:
-            from autoteam.chatgpt_api import ChatGPTTeamAPI
-            from autoteam.manager import get_team_member_count
-
-            chatgpt = ChatGPTTeamAPI()
-            chatgpt.start()
-            result_holder["count"] = get_team_member_count(chatgpt)
-        except Exception as exc:
-            result_holder["error"] = exc
-        finally:
+        def _worker(result_holder=result_holder, done=done):
+            chatgpt = None
             try:
-                if chatgpt and chatgpt.browser:
-                    chatgpt.stop()
-            except Exception:
-                pass
-            done.set()
+                from autoteam.chatgpt_api import ChatGPTTeamAPI
+                from autoteam.manager import get_team_member_count
 
-    thread = threading.Thread(target=_worker, daemon=True)
-    thread.start()
-    if not done.wait(timeout=timeout_seconds):
-        logger.warning("[巡检] 查询 Team 实际成员数超时（>%ss），跳过本轮人数校验", timeout_seconds)
-        return -1
+                chatgpt = ChatGPTTeamAPI()
+                chatgpt.start()
+                result_holder["count"] = get_team_member_count(chatgpt)
+            except Exception as exc:
+                result_holder["error"] = exc
+            finally:
+                try:
+                    if chatgpt and chatgpt.browser:
+                        chatgpt.stop()
+                except Exception:
+                    pass
+                done.set()
 
-    if "error" in result_holder:
-        logger.warning("[巡检] 查询 Team 实际成员数失败: %s", result_holder["error"])
-        return -1
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+        if not done.wait(timeout=timeout_seconds):
+            if attempt < retries:
+                logger.warning(
+                    "[巡检] 查询 Team 实际成员数超时（>%ss），准备重试第 %d/%d 次",
+                    timeout_seconds,
+                    attempt + 1,
+                    retries,
+                )
+                continue
+            logger.warning(
+                "[巡检] 查询 Team 实际成员数超时（>%ss，已重试 %d 次），跳过本轮人数校验",
+                timeout_seconds,
+                retries,
+            )
+            return -1
 
-    try:
-        return int(result_holder.get("count", -1))
-    except Exception:
-        return -1
+        if "error" in result_holder:
+            logger.warning("[巡检] 查询 Team 实际成员数失败: %s", result_holder["error"])
+            return -1
+
+        try:
+            return int(result_holder.get("count", -1))
+        except Exception:
+            return -1
+
+    return -1
 
 
 def _auto_check_loop():

@@ -452,8 +452,31 @@ def test_auto_check_team_member_count_times_out_without_blocking(monkeypatch):
     monkeypatch.setattr("autoteam.manager.get_team_member_count", lambda _chatgpt: 5)
 
     started = time.monotonic()
-    result = api._auto_check_team_member_count(timeout_seconds=0.05)
+    result = api._auto_check_team_member_count(timeout_seconds=0.05, retries=1)
     elapsed = time.monotonic() - started
 
     assert result == -1
     assert elapsed < 0.15
+
+
+def test_auto_check_team_member_count_retries_three_times_on_timeout(monkeypatch):
+    attempts = {"count": 0}
+
+    class _SlowChatGPT:
+        def __init__(self):
+            self.browser = True
+
+        def start(self):
+            attempts["count"] += 1
+            time.sleep(0.08)
+
+        def stop(self):
+            self.browser = False
+
+    monkeypatch.setattr("autoteam.chatgpt_api.ChatGPTTeamAPI", _SlowChatGPT)
+    monkeypatch.setattr("autoteam.manager.get_team_member_count", lambda _chatgpt: 5)
+
+    result = api._auto_check_team_member_count(timeout_seconds=0.01, retries=3)
+
+    assert result == -1
+    assert attempts["count"] == 3
