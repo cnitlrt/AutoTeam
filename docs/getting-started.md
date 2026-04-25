@@ -9,16 +9,20 @@
 | 服务 | 说明 | 获取方式 |
 |------|------|---------|
 | **ChatGPT Team 订阅** | 管理员主号，需要有 Team 订阅 | [chatgpt.com](https://chatgpt.com) |
-| **CloudMail** | 临时邮箱服务，用于自动注册与收验证码 | 自建 [cloud-mail](https://github.com/maillab/cloud-mail) |
-| **CLIProxyAPI** | Codex 代理与认证文件同步目标 | 自建 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) |
+| **CloudMail / Cloudflare Temp Email** | 二选一的临时邮箱服务，用于自动注册与收验证码 | 自建 [cloud-mail](https://github.com/maillab/cloud-mail) / [cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email) |
+| **CLIProxyAPI / Sub2API** | 可选的认证同步目标，可启用一个或同时启用 | 自建 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) / [Sub2API](https://github.com/Wei-Shaw/sub2api) |
 | **VPS / 本地机器** | 推荐 Ubuntu 22.04+；也支持 Windows / macOS | 任意云服务商 / 本地电脑 |
-| **域名** | 用于 CloudMail 临时邮箱与 Verified Domains | 任意域名注册商 |
+| **域名** | 用于邮箱服务与 Verified Domains | 任意域名注册商 |
 
 > 建议使用住宅 IP 或干净的 VPS IP，避免被 OpenAI / Cloudflare 标记。
 
 ## 准备工作
 
-### 1. 搭建 CloudMail
+### 1. 搭建邮箱服务（CloudMail / Cloudflare Temp Email）
+
+二选一即可。
+
+#### 方案 A：CloudMail
 
 参考 CloudMail 官方文档完成搭建：https://doc.skymail.ink/guide/dashboard
 
@@ -26,6 +30,17 @@
 - CloudMail API 地址（如 `https://your-domain.com/api`）
 - 管理员邮箱和密码
 - 邮箱域名（如 `@your-domain.com`）
+
+#### 方案 B：Cloudflare Temp Email
+
+项目地址：<https://github.com/dreamhunter2333/cloudflare_temp_email>
+
+搭建完成后你通常会得到：
+- 后端 API 地址（如 `https://temp-email-api.example.com` 或 `https://xxxxx.workers.dev`）
+- 管理员密码
+- 默认邮箱域名（如 `email.example.com`）
+
+> 注意：AutoTeam 里 `CF_TEMP_EMAIL_BASE_URL` 要填写 **后端 API 根地址**，不是前端 `pages.dev` 管理页面地址。
 
 ### 2. 设置 OpenAI Verified Domains
 
@@ -40,13 +55,27 @@
 
 这样使用该域名邮箱注册的 ChatGPT 账号会自动加入 Team workspace，不需要手动邀请。
 
-### 3. 搭建 CLIProxyAPI
+### 3. 搭建远端同步目标（CLIProxyAPI / Sub2API）
+
+可选，但推荐至少准备一个；也可以两个都启用。
+
+#### 方案 A：CLIProxyAPI
 
 参考 CPA 项目文档完成搭建：https://github.com/router-for-me/CLIProxyAPI
 
 搭建完成后你会得到：
 - CPA 地址（如 `http://127.0.0.1:8317`）
 - 管理密钥（`secret-key`）
+
+#### 方案 B：Sub2API
+
+项目地址：<https://github.com/Wei-Shaw/sub2api>
+
+搭建完成后你会得到：
+- Sub2API 地址（如 `http://127.0.0.1:8080`）
+- 管理员邮箱
+- 管理员密码
+- 可选分组名 / 分组 ID（如果你希望同步后的账号自动加入分组）
 
 ## 第一步：安装
 
@@ -89,20 +118,43 @@ docker compose up -d
 uv run autoteam api
 ```
 
-按提示依次填入：
+按提示依次填入（首次启动只强制要求 API Key，其余也可稍后在 Web 配置面板填写）：
 
 ```text
 === AutoTeam 首次配置 ===
 
-  CloudMail API 地址: https://your-cloudmail.com/api
-  CloudMail 登录邮箱: admin@your-domain.com
-  CloudMail 登录密码: your_password
-  CloudMail 邮箱域名（如 @example.com）: @your-domain.com
-  CPA 管理密钥: your_cpa_key
   API 鉴权密钥 [回车自动生成]:
 ```
 
-配置会自动验证 CloudMail 和 CPA 的连通性，失败会提示具体原因。
+如果你直接在 `.env` / 配置面板里填写运行项，常见组合例如：
+
+```dotenv
+# 邮箱服务（二选一）
+MAIL_PROVIDER=cloudmail
+CLOUDMAIL_BASE_URL=https://your-cloudmail.com/api
+CLOUDMAIL_EMAIL=admin@your-domain.com
+CLOUDMAIL_PASSWORD=your_password
+CLOUDMAIL_DOMAIN=@your-domain.com
+
+# 或
+MAIL_PROVIDER=cloudflare_temp_email
+CF_TEMP_EMAIL_BASE_URL=https://temp-email-api.example.com
+CF_TEMP_EMAIL_ADMIN_PASSWORD=your_admin_password
+CF_TEMP_EMAIL_DOMAIN=email.example.com
+
+# 远端同步（可启用一个或两个）
+SYNC_TARGET_CPA=true
+CPA_URL=http://127.0.0.1:8317
+CPA_KEY=your_cpa_key
+
+SYNC_TARGET_SUB2API=true
+SUB2API_URL=http://127.0.0.1:8080
+SUB2API_EMAIL=admin@example.com
+SUB2API_PASSWORD=your_sub2api_password
+SUB2API_GROUP=Team Pool
+```
+
+配置保存时会自动验证当前邮箱服务，以及已启用的 CPA / Sub2API 连通性，失败会提示具体原因。
 
 ### Docker 部署
 
@@ -169,7 +221,7 @@ uv run autoteam rotate 5
 3. 移出额度低于阈值的账号
 4. 优先复用 standby 中额度已恢复的旧号
 5. 不够时自动创建新账号
-6. 同步 active 认证文件到 CPA
+6. 同步 active 认证文件到已启用远端（CPA / Sub2API）
 
 > **注意：**
 > `rotate 5` / `fill 5` 中的 `5` 指的是 **Team 总人数目标**，不是“本地管理账号数量”。
@@ -195,7 +247,7 @@ API 模式下：
 uv run autoteam status      # 查看状态
 uv run autoteam check       # 检查额度
 uv run autoteam rotate 5    # 智能轮转
-uv run autoteam sync        # 同步到 CPA
+uv run autoteam sync        # 同步到已启用远端
 uv run autoteam pull-cpa    # 从 CPA 拉回本地
 ```
 
