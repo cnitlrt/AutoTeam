@@ -1,6 +1,6 @@
 <template>
-  <div class="mt-6 space-y-6">
-    <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+  <div class="space-y-6">
+    <div v-if="showAdminSection" class="glass-card p-5">
       <div class="flex items-center justify-between gap-4 mb-4">
         <div>
           <h2 class="text-lg font-semibold text-white">管理员登录</h2>
@@ -20,7 +20,7 @@
         </span>
       </div>
 
-      <div v-if="message" class="mb-4 px-4 py-3 rounded-lg text-sm border" :class="messageClass">
+      <div v-if="message" class="mb-4 rounded-2xl px-4 py-3 text-sm border" :class="messageClass">
         {{ message }}
       </div>
 
@@ -331,7 +331,7 @@
       </div>
     </div>
 
-    <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+    <div v-if="showAutoCheckSection" class="glass-card p-5">
       <div class="flex items-center justify-between mb-4">
         <h2 class="text-lg font-semibold text-white">巡检设置</h2>
         <span v-if="saved" class="text-xs text-green-400 transition">已保存</span>
@@ -390,6 +390,10 @@ const props = defineProps({
     type: Object,
     default: null,
   },
+  section: {
+    type: String,
+    default: 'all',
+  },
 })
 
 const emit = defineEmits(['refresh', 'admin-progress'])
@@ -420,6 +424,8 @@ const adminConfigured = computed(() => !!props.adminStatus?.configured)
 const adminBusy = computed(() => !!props.adminStatus?.login_in_progress)
 const codexBusy = computed(() => !!props.codexStatus?.in_progress)
 const codexActionLabel = computed(() => props.codexStatus?.action === 'sync' ? '同步' : '登录')
+const showAdminSection = computed(() => props.section !== 'auto-check')
+const showAutoCheckSection = computed(() => props.section !== 'admin')
 
 watch(
   () => props.adminStatus,
@@ -456,7 +462,9 @@ watch(
 )
 
 onMounted(async () => {
-  await loadAutoCheckConfig()
+  if (showAutoCheckSection.value) {
+    await loadAutoCheckConfig()
+  }
 })
 
 function setMessage(text, type = 'success') {

@@ -14,14 +14,19 @@ logger = logging.getLogger(__name__)
 ENV_FILE = PROJECT_ROOT / ".env"
 ENV_EXAMPLE = PROJECT_ROOT / ".env.example"
 
-# 需要交互式输入的配置项（key, 提示, 默认值, 是否可选）
+# 启动时硬性要求的配置项（目前仅 API_KEY）
+STARTUP_REQUIRED_CONFIGS = [
+    ("API_KEY", "API 鉴权密钥（回车自动生成）", "", False),
+]
+
+# 可在配置面板中编辑的配置项（key, 提示, 默认值, 是否可选）
 REQUIRED_CONFIGS = [
-    ("CLOUDMAIL_BASE_URL", "CloudMail API 地址", "", False),
-    ("CLOUDMAIL_EMAIL", "CloudMail 登录邮箱", "", False),
-    ("CLOUDMAIL_PASSWORD", "CloudMail 登录密码", "", False),
-    ("CLOUDMAIL_DOMAIN", "CloudMail 邮箱域名（如 @example.com）", "", False),
-    ("CPA_URL", "CPA (CLIProxyAPI) 地址", "http://127.0.0.1:8317", False),
-    ("CPA_KEY", "CPA 管理密钥", "", False),
+    ("CLOUDMAIL_BASE_URL", "CloudMail API 地址", "", True),
+    ("CLOUDMAIL_EMAIL", "CloudMail 登录邮箱", "", True),
+    ("CLOUDMAIL_PASSWORD", "CloudMail 登录密码", "", True),
+    ("CLOUDMAIL_DOMAIN", "CloudMail 邮箱域名（如 @example.com）", "", True),
+    ("CPA_URL", "CPA (CLIProxyAPI) 地址", "http://127.0.0.1:8317", True),
+    ("CPA_KEY", "CPA 管理密钥", "", True),
     ("PLAYWRIGHT_PROXY_URL", "Playwright 浏览器代理 URL（可选，如 socks5://host:port）", "", True),
     ("PLAYWRIGHT_PROXY_BYPASS", "Playwright 代理绕过列表（可选，如 localhost,127.0.0.1）", "", True),
     ("API_KEY", "API 鉴权密钥（回车自动生成）", "", False),
@@ -79,19 +84,12 @@ def check_and_setup(interactive: bool = True) -> bool:
     env = _read_env()
     missing = []
 
-    for key, prompt, default, optional in REQUIRED_CONFIGS:
+    for key, prompt, default, optional in STARTUP_REQUIRED_CONFIGS:
         val = env.get(key, "") or os.environ.get(key, "")
         if not val and not optional:
             missing.append((key, prompt, default, optional))
 
     if not missing:
-        # 配置齐全，每次启动验证连通性
-        if not _verify_cloudmail():
-            logger.error("[验证] CloudMail 配置有误，请修改 .env 后重新启动")
-            sys.exit(1)
-        if not _verify_cpa():
-            logger.error("[验证] CPA 配置有误，请修改 .env 后重新启动")
-            sys.exit(1)
         return True
 
     if not interactive:
@@ -144,14 +142,6 @@ def check_and_setup(interactive: bool = True) -> bool:
         importlib.reload(autoteam.cloudmail)
     except Exception:
         pass
-
-    # 验证配置连通性
-    if not _verify_cloudmail():
-        logger.error("[验证] CloudMail 配置有误，请修改 .env 后重新启动")
-        sys.exit(1)
-    if not _verify_cpa():
-        logger.error("[验证] CPA 配置有误，请修改 .env 后重新启动")
-        sys.exit(1)
 
     return True
 

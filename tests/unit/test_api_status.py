@@ -72,15 +72,13 @@ def test_sanitize_account_keeps_exportable_main_account_active_without_live_quot
     assert sanitized["status"] == "active"
 
 
-def test_post_setup_save_keeps_cpa_url_required_and_generates_api_key(monkeypatch):
+def test_post_setup_save_only_requires_api_key_and_generates_one(monkeypatch):
     written = {}
 
     def fake_write_env(key, value):
         written[key] = value
 
     monkeypatch.setattr("autoteam.setup_wizard._write_env", fake_write_env)
-    monkeypatch.setattr("autoteam.setup_wizard._verify_cloudmail", lambda: True)
-    monkeypatch.setattr("autoteam.setup_wizard._verify_cpa", lambda: True)
     monkeypatch.setattr("secrets.token_urlsafe", lambda _n: "generated-token")
     monkeypatch.setattr("importlib.reload", lambda module: module)
     monkeypatch.setattr(api, "API_KEY", "")
@@ -101,10 +99,33 @@ def test_post_setup_save_keeps_cpa_url_required_and_generates_api_key(monkeypatc
         )
     )
 
-    assert written["CPA_URL"] == "http://127.0.0.1:8317"
     assert written["API_KEY"] == "generated-token"
     assert result["api_key"] == "generated-token"
     assert api.API_KEY == "generated-token"
+    assert "CPA_URL" not in written
+
+
+def test_get_setup_status_only_requires_api_key(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr("autoteam.setup_wizard.ENV_FILE", env_file)
+    monkeypatch.setattr("autoteam.setup_wizard.ENV_EXAMPLE", tmp_path / ".env.example")
+    for key in ("API_KEY", "CLOUDMAIL_BASE_URL", "CPA_KEY"):
+        monkeypatch.delenv(key, raising=False)
+
+    result = api.get_setup_status()
+
+    assert result["configured"] is False
+    assert result["fields"] == [
+        {
+            "key": "API_KEY",
+            "prompt": "API 鉴权密钥（回车自动生成）",
+            "default": "",
+            "optional": False,
+            "configured": False,
+        }
+    ]
 
 
 def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monkeypatch):
@@ -149,6 +170,111 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
     assert fields["PLAYWRIGHT_PROXY_URL"]["value"] == "socks5://127.0.0.1:1080"
     assert fields["PLAYWRIGHT_PROXY_BYPASS"]["value"] == "localhost,127.0.0.1"
     assert fields["API_KEY"]["value"] == "runtime-key"
+
+
+def test_put_runtime_config_allows_partial_runtime_fields_when_api_key_exists(monkeypatch):
+    written = {}
+
+    def fake_write_env(key, value):
+        written[key] = value
+
+    monkeypatch.setattr("autoteam.setup_wizard._write_env", fake_write_env)
+    monkeypatch.setattr(
+        "autoteam.setup_wizard._verify_cloudmail",
+        lambda: (_ for _ in ()).throw(AssertionError("cloudmail verify should not run")),
+    )
+    monkeypatch.setattr(
+        "autoteam.setup_wizard._verify_cpa",
+        lambda: (_ for _ in ()).throw(AssertionError("cpa verify should not run")),
+    )
+    monkeypatch.setattr("importlib.reload", lambda module: module)
+    monkeypatch.setattr(api, "API_KEY", "old-key")
+
+    monkeypatch.setenv("API_KEY", "old-key")
+    monkeypatch.delenv("CLOUDMAIL_BASE_URL", raising=False)
+    monkeypatch.delenv("CLOUDMAIL_EMAIL", raising=False)
+    monkeypatch.delenv("CLOUDMAIL_PASSWORD", raising=False)
+    monkeypatch.delenv("CLOUDMAIL_DOMAIN", raising=False)
+    monkeypatch.delenv("CPA_URL", raising=False)
+    monkeypatch.delenv("CPA_KEY", raising=False)
+
+    result = api.put_runtime_config(
+        api.SetupConfig(
+            CLOUDMAIL_BASE_URL="",
+            CLOUDMAIL_EMAIL="",
+            CLOUDMAIL_PASSWORD="",
+            CLOUDMAIL_DOMAIN="",
+            CPA_URL="",
+            CPA_KEY="",
+            PLAYWRIGHT_PROXY_URL="",
+            PLAYWRIGHT_PROXY_BYPASS="",
+            API_KEY="old-key",
+        )
+    )
+
+    assert result["message"] == "配置保存成功"
+    assert written["API_KEY"] == "old-key"
+    assert "CPA_URL" not in written
+
+
+def test_get_runtime_config_source_returns_env_content(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("CLOUDMAIL_EMAIL=admin@example.com\nAPI_KEY=test-key\n", encoding="utf-8")
+
+    monkeypatch.setattr("autoteam.setup_wizard.ENV_FILE", env_file)
+    monkeypatch.setattr("autoteam.setup_wizard.ENV_EXAMPLE", tmp_path / ".env.example")
+
+    result = api.get_runtime_config_source()
+
+    assert result["path"].endswith(".env")
+    assert "CLOUDMAIL_EMAIL=admin@example.com" in result["content"]
+    assert "API_KEY=test-key" in result["content"]
+
+
+def test_put_runtime_config_source_applies_env_and_updates_api_key(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("API_KEY=old-key\n", encoding="utf-8")
+
+    monkeypatch.setattr("autoteam.setup_wizard.ENV_FILE", env_file)
+    monkeypatch.setattr("autoteam.setup_wizard.ENV_EXAMPLE", tmp_path / ".env.example")
+    monkeypatch.setattr("autoteam.setup_wizard._verify_cloudmail", lambda: True)
+    monkeypatch.setattr("autoteam.setup_wizard._verify_cpa", lambda: True)
+    monkeypatch.setattr("importlib.reload", lambda module: module)
+    monkeypatch.setattr(api, "API_KEY", "old-key")
+
+    for key in (
+        "CLOUDMAIL_BASE_URL",
+        "CLOUDMAIL_EMAIL",
+        "CLOUDMAIL_PASSWORD",
+        "CLOUDMAIL_DOMAIN",
+        "CPA_URL",
+        "CPA_KEY",
+        "PLAYWRIGHT_PROXY_URL",
+        "PLAYWRIGHT_PROXY_BYPASS",
+        "API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    result = api.put_runtime_config_source(
+        api.SourceConfig(
+            content="\n".join(
+                [
+                    "CLOUDMAIL_BASE_URL=http://mail.example.com",
+                    "CLOUDMAIL_EMAIL=admin@example.com",
+                    "CLOUDMAIL_PASSWORD=secret",
+                    "CLOUDMAIL_DOMAIN=@example.com",
+                    "CPA_URL=http://127.0.0.1:8317",
+                    "CPA_KEY=key-1",
+                    "API_KEY=new-key",
+                ]
+            )
+        )
+    )
+
+    assert result["message"] == "源文件保存成功"
+    assert result["api_key"] == "new-key"
+    assert api.API_KEY == "new-key"
+    assert env_file.read_text(encoding="utf-8").splitlines()[0] == "CLOUDMAIL_BASE_URL=http://mail.example.com"
 
 
 def test_auto_check_persists_reuse_blocking_metadata_before_rotate(tmp_path, monkeypatch):

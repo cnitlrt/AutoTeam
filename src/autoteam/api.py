@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from autoteam.config import API_KEY
-from autoteam.textio import read_text
+from autoteam.textio import parse_env_line, read_text, write_text
 
 logger = logging.getLogger(__name__)
 
@@ -79,19 +79,45 @@ class SetupConfig(BaseModel):
     API_KEY: str = ""
 
 
+class SourceConfig(BaseModel):
+    content: str = ""
+
+
 _RUNTIME_CONFIG_CLEARABLE_FIELDS = {
     "PLAYWRIGHT_PROXY_URL",
     "PLAYWRIGHT_PROXY_BYPASS",
 }
 
+_ALL_RUNTIME_ENV_KEYS = [
+    "CLOUDMAIL_BASE_URL",
+    "CLOUDMAIL_EMAIL",
+    "CLOUDMAIL_PASSWORD",
+    "CLOUDMAIL_DOMAIN",
+    "CHATGPT_ACCOUNT_ID",
+    "CPA_URL",
+    "CPA_KEY",
+    "EMAIL_POLL_INTERVAL",
+    "EMAIL_POLL_TIMEOUT",
+    "API_KEY",
+    "AUTO_CHECK_INTERVAL",
+    "AUTO_CHECK_THRESHOLD",
+    "AUTO_CHECK_MIN_LOW",
+    "PLAYWRIGHT_PROXY_URL",
+    "PLAYWRIGHT_PROXY_SERVER",
+    "PLAYWRIGHT_PROXY_USERNAME",
+    "PLAYWRIGHT_PROXY_PASSWORD",
+    "PLAYWRIGHT_PROXY_BYPASS",
+]
 
-def _collect_config_fields(*, include_values: bool = False):
+
+def _collect_config_fields(*, include_values: bool = False, configs=None):
     from autoteam.setup_wizard import REQUIRED_CONFIGS, _read_env
 
     env = _read_env()
+    config_items = configs or REQUIRED_CONFIGS
     fields = []
     all_ok = True
-    for key, prompt, default, optional in REQUIRED_CONFIGS:
+    for key, prompt, default, optional in config_items:
         raw_value = env.get(key, "") or os.environ.get(key, "")
         configured = bool(raw_value)
         if not configured and not optional:
@@ -135,27 +161,117 @@ def _restore_runtime_env(previous_env: dict[str, str | None]):
             os.environ[key] = previous
 
 
+def _read_runtime_source_text():
+    from autoteam.setup_wizard import ENV_EXAMPLE, ENV_FILE
+
+    if ENV_FILE.exists():
+        return read_text(ENV_FILE), str(ENV_FILE)
+    if ENV_EXAMPLE.exists():
+        return read_text(ENV_EXAMPLE), str(ENV_FILE)
+    return "", str(ENV_FILE)
+
+
+def _write_runtime_source_text(content: str):
+    from autoteam.setup_wizard import ENV_FILE
+
+    write_text(ENV_FILE, content)
+
+
+def _restore_runtime_source_text(previous_exists: bool, previous_content: str):
+    from autoteam.setup_wizard import ENV_FILE
+
+    if previous_exists:
+        write_text(ENV_FILE, previous_content)
+        return
+    if ENV_FILE.exists():
+        ENV_FILE.unlink()
+
+
+def _load_env_values_from_source(content: str, env_keys: list[str]):
+    values = {key: "" for key in env_keys}
+    for line in content.splitlines():
+        parsed = parse_env_line(line)
+        if not parsed:
+            continue
+        key, value = parsed
+        if key in values:
+            values[key] = value
+    return values
+
+
+def _validate_runtime_required_values(values: dict[str, str]):
+    from autoteam.setup_wizard import STARTUP_REQUIRED_CONFIGS
+
+    return [
+        f"{key} ({prompt})"
+        for key, prompt, _default, optional in STARTUP_REQUIRED_CONFIGS
+        if not optional and not values.get(key)
+    ]
+
+
+def _sync_runtime_globals():
+    global API_KEY
+
+    API_KEY = os.environ.get("API_KEY", "")
+
+    auto_check_config = globals().get("_auto_check_config")
+    auto_check_restart = globals().get("_auto_check_restart")
+    if auto_check_config is None:
+        return
+
+    try:
+        from autoteam.config import AUTO_CHECK_INTERVAL, AUTO_CHECK_MIN_LOW, AUTO_CHECK_THRESHOLD
+
+        auto_check_config["interval"] = AUTO_CHECK_INTERVAL
+        auto_check_config["threshold"] = AUTO_CHECK_THRESHOLD
+        auto_check_config["min_low"] = AUTO_CHECK_MIN_LOW
+        if auto_check_restart is not None:
+            auto_check_restart.set()
+    except Exception:
+        pass
+
+
+def _verify_runtime_integrations(previous_env: dict[str, str | None] | None = None):
+    from autoteam.setup_wizard import _verify_cloudmail, _verify_cpa
+
+    errors = []
+    cloudmail_keys = (
+        "CLOUDMAIL_BASE_URL",
+        "CLOUDMAIL_EMAIL",
+        "CLOUDMAIL_PASSWORD",
+        "CLOUDMAIL_DOMAIN",
+    )
+    cpa_keys = ("CPA_URL", "CPA_KEY")
+
+    cloudmail_values = [os.environ.get(key, "") for key in cloudmail_keys]
+    cpa_values = [os.environ.get(key, "") for key in cpa_keys]
+
+    if all(cloudmail_values) and not _verify_cloudmail():
+        errors.append("CloudMail 连接失败")
+    if all(cpa_values) and not _verify_cpa():
+        errors.append("CPA 连接失败")
+    if errors:
+        api_key = ""
+        if previous_env:
+            api_key = previous_env.get("API_KEY", "") or ""
+        return JSONResponse(status_code=400, content={"message": "、".join(errors), "api_key": api_key})
+    return None
+
+
 def _save_runtime_config(data: dict[str, str]):
     """保存运行时配置到 .env，并在当前进程立即生效。"""
     import secrets as _secrets
 
-    from autoteam.setup_wizard import REQUIRED_CONFIGS, _verify_cloudmail, _verify_cpa, _write_env
+    from autoteam.setup_wizard import REQUIRED_CONFIGS, _write_env
 
-    defaults = {key: default for key, _prompt, default, _optional in REQUIRED_CONFIGS}
     env_keys = [key for key, _prompt, _default, _optional in REQUIRED_CONFIGS]
     existing = {key: os.environ.get(key, "") for key in env_keys}
     merged = {key: data.get(key, existing.get(key, "")) for key in env_keys}
 
-    if not merged.get("CPA_URL"):
-        merged["CPA_URL"] = defaults.get("CPA_URL", "http://127.0.0.1:8317")
     if not merged.get("API_KEY"):
         merged["API_KEY"] = _secrets.token_urlsafe(24)
 
-    missing = [
-        f"{key} ({prompt})"
-        for key, prompt, _default, optional in REQUIRED_CONFIGS
-        if not optional and not merged.get(key)
-    ]
+    missing = _validate_runtime_required_values(merged)
     if missing:
         return JSONResponse(
             status_code=400,
@@ -168,28 +284,18 @@ def _save_runtime_config(data: dict[str, str]):
             os.environ[key] = value
         _reload_runtime_config_modules()
 
-        errors = []
-        if not _verify_cloudmail():
-            errors.append("CloudMail 连接失败")
-        if not _verify_cpa():
-            errors.append("CPA 连接失败")
-
-        if errors:
+        verify_result = _verify_runtime_integrations(previous_env)
+        if verify_result:
             _restore_runtime_env(previous_env)
             _reload_runtime_config_modules()
-            return JSONResponse(
-                status_code=400,
-                content={"message": "、".join(errors), "api_key": previous_env.get("API_KEY", "") or ""},
-            )
+            return verify_result
 
         for key, value in merged.items():
             if value or key in _RUNTIME_CONFIG_CLEARABLE_FIELDS:
                 _write_env(key, value)
 
-        global API_KEY
-        API_KEY = merged["API_KEY"]
-
-        return {"message": "配置保存成功", "api_key": merged["API_KEY"], "configured": True}
+        _sync_runtime_globals()
+        return {"message": "配置保存成功", "api_key": API_KEY, "configured": True}
     except Exception:
         _restore_runtime_env(previous_env)
         _reload_runtime_config_modules()
@@ -199,7 +305,9 @@ def _save_runtime_config(data: dict[str, str]):
 @app.get("/api/setup/status")
 def get_setup_status():
     """检查配置是否完整"""
-    return _collect_config_fields()
+    from autoteam.setup_wizard import STARTUP_REQUIRED_CONFIGS
+
+    return _collect_config_fields(configs=STARTUP_REQUIRED_CONFIGS)
 
 
 @app.post("/api/setup/save")
@@ -214,10 +322,71 @@ def get_runtime_config():
     return _collect_config_fields(include_values=True)
 
 
+@app.get("/api/config/source")
+def get_runtime_config_source():
+    """获取 .env 源文件内容。"""
+    content, path = _read_runtime_source_text()
+    return {"path": path, "content": content}
+
+
 @app.put("/api/config/runtime")
 def put_runtime_config(config: SetupConfig):
     """登录后修改 CloudMail / CPA / 代理等运行时配置。"""
     return _save_runtime_config(config.model_dump())
+
+
+@app.put("/api/config/source")
+def put_runtime_config_source(config: SourceConfig):
+    """保存 .env 源文件内容，并立即应用到运行时。"""
+    env_keys = list(_ALL_RUNTIME_ENV_KEYS)
+    previous_env = {key: os.environ.get(key) for key in env_keys}
+    source_path = None
+    previous_exists = False
+    previous_content = ""
+
+    try:
+        current_content, source_path = _read_runtime_source_text()
+        previous_content = current_content
+        from autoteam.setup_wizard import ENV_FILE
+
+        previous_exists = ENV_FILE.exists()
+
+        _write_runtime_source_text(config.content)
+
+        loaded_values = _load_env_values_from_source(config.content, env_keys)
+        missing = _validate_runtime_required_values(loaded_values)
+        if missing:
+            _restore_runtime_source_text(previous_exists, previous_content)
+            _restore_runtime_env(previous_env)
+            _reload_runtime_config_modules()
+            return JSONResponse(status_code=400, content={"message": "缺少必填项: " + "、".join(missing)})
+
+        for key in env_keys:
+            if loaded_values.get(key):
+                os.environ[key] = loaded_values[key]
+            else:
+                os.environ.pop(key, None)
+
+        _reload_runtime_config_modules()
+        verify_result = _verify_runtime_integrations(previous_env)
+        if verify_result:
+            _restore_runtime_source_text(previous_exists, previous_content)
+            _restore_runtime_env(previous_env)
+            _reload_runtime_config_modules()
+            return verify_result
+
+        _sync_runtime_globals()
+        return {
+            "message": "源文件保存成功",
+            "api_key": API_KEY,
+            "configured": True,
+            "path": source_path,
+        }
+    except Exception:
+        _restore_runtime_source_text(previous_exists, previous_content)
+        _restore_runtime_env(previous_env)
+        _reload_runtime_config_modules()
+        raise
 
 
 # ---------------------------------------------------------------------------

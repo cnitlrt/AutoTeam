@@ -44,6 +44,8 @@ export const api = {
   saveSetup: (config) => request('POST', '/setup/save', config),
   getRuntimeConfig: () => request('GET', '/config/runtime'),
   saveRuntimeConfig: (config) => request('PUT', '/config/runtime', config),
+  getRuntimeConfigSource: () => request('GET', '/config/source'),
+  saveRuntimeConfigSource: (payload) => request('PUT', '/config/source', payload),
 
   getStatus: () => request('GET', '/status'),
   getAdminStatus: () => request('GET', '/admin/status'),
