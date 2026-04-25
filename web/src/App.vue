@@ -1,4 +1,6 @@
 <template>
+  <ThemeToggle v-if="needSetup || !authenticated" floating />
+
   <!-- 初始配置页 -->
   <SetupPage v-if="needSetup" @configured="onSetupDone" />
 
@@ -99,6 +101,10 @@
     <!-- 主内容区 -->
     <div class="relative min-w-0 flex-1 overflow-y-auto pb-20 md:pb-8">
       <div class="mx-auto w-full max-w-[1500px] px-4 py-4 md:px-8 md:py-8">
+        <div class="mb-5 flex justify-end">
+          <ThemeToggle />
+        </div>
+
       <!-- 任务执行中提示 -->
         <div
           v-if="busyTask"
@@ -161,6 +167,8 @@ import SyncPage from './components/SyncPage.vue'
 import TaskHistoryPage from './components/TaskHistoryPage.vue'
 import LogViewer from './components/LogViewer.vue'
 import OAuthPage from './components/OAuthPage.vue'
+import ThemeToggle from './components/ThemeToggle.vue'
+import { initTheme } from './theme.js'
 
 const needSetup = ref(false)
 const authenticated = ref(false)
@@ -309,6 +317,7 @@ function onSetupDone() {
 }
 
 onMounted(async () => {
+  initTheme()
   const setupOk = await checkSetup()
   if (!setupOk) {
     needSetup.value = true

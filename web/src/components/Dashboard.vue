@@ -42,7 +42,7 @@
             <tr v-for="(acc, i) in status.accounts" :key="acc.email"
               class="border-b border-gray-800/50 hover:bg-gray-800/30 transition">
               <td class="px-4 py-3 text-gray-500">{{ i + 1 }}</td>
-              <td class="px-4 py-3 font-mono text-xs">{{ acc.email }}</td>
+              <td class="px-4 py-3 font-mono text-xs text-slate-200">{{ acc.email }}</td>
               <td class="px-4 py-3">
                 <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium"
                   :class="statusClass(acc.status)">

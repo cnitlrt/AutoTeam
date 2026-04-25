@@ -3,7 +3,7 @@
     <div class="flex items-center justify-between mb-6">
       <h2 class="text-xl font-bold text-white">Team 成员</h2>
       <button @click="fetchMembers" :disabled="loading"
-        class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-sm rounded-lg border border-gray-700 transition disabled:opacity-50">
+        class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-sm rounded-lg border border-gray-700 transition disabled:opacity-50 text-gray-300 hover:text-white">
         {{ loading ? '加载中...' : '刷新' }}
       </button>
     </div>
@@ -37,7 +37,7 @@
               <tr v-for="(m, i) in data.members" :key="m.email + m.type"
                 class="border-b border-gray-800/50 hover:bg-gray-800/30 transition">
                 <td class="px-4 py-3 text-gray-500">{{ i + 1 }}</td>
-                <td class="px-4 py-3 font-mono text-xs">{{ m.email }}</td>
+                <td class="px-4 py-3 font-mono text-xs text-slate-200">{{ m.email }}</td>
                 <td class="px-4 py-3">
                   <span class="px-2 py-0.5 rounded text-xs font-medium"
                     :class="{

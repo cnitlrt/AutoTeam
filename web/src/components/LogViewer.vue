@@ -8,7 +8,7 @@
           自动滚动
         </label>
         <button @click="fetchLogs" :disabled="loading"
-          class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-sm rounded-lg border border-gray-700 transition disabled:opacity-50">
+          class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-sm rounded-lg border border-gray-700 transition disabled:opacity-50 text-gray-300 hover:text-white">
           刷新
         </button>
         <button @click="clearLogs"
