@@ -24,7 +24,7 @@
 
 | | 功能 | 描述 |
 |---|---|---|
-| 📧 | **自动注册** | CloudMail 临时邮箱 + Playwright 自动注册 |
+| 📧 | **自动注册** | 支持 CloudMail / Cloudflare Temp Email + Playwright 自动注册 |
 | 🔐 | **Codex OAuth** | 自动登录 Codex，无密码时可走邮箱验证码 |
 | 🔑 | **手动 OAuth 导入** | 支持 localhost 自动回调，也支持手动粘贴回调 URL |
 | 🔄 | **智能轮转** | 额度不足自动移出，旧号恢复后优先复用 |
@@ -62,7 +62,7 @@ uv run autoteam api
 uv run autoteam rotate
 ```
 
-首次启动只强制要求 API Key。CloudMail、CPA / Sub2API、代理等运行项可以在登录后进入配置面板继续设置；只有执行对应功能时才会校验相关配置。
+首次启动只强制要求 API Key。邮箱服务、CPA / Sub2API、代理等运行项可以在登录后进入配置面板继续设置；只有执行对应功能时才会校验相关配置。
 
 ### Docker 部署
 
@@ -119,17 +119,67 @@ PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:3333
 | 🔐 OAuth 登录 | 生成认证链接；优先自动接收 localhost 回调，失败时也可手动粘贴回调 URL |
 | 📜 任务历史 | 查看后台任务执行状态、参数、耗时与结果 |
 | 📋 日志 | 实时日志查看器 |
-| ⚙️ 配置面板 | CloudMail、远端同步、代理 / 高级、安全 / 访问控制、管理员 / 主号、巡检设置、源文件编辑 |
+| ⚙️ 配置面板 | 邮箱服务、远端同步、代理 / 高级、安全 / 访问控制、管理员 / 主号、巡检设置、源文件编辑 |
 
 ### 配置面板说明
 
-- **CloudMail**：注册、复用、收验证码所需配置
+- **邮箱服务**：统一管理 CloudMail / Cloudflare Temp Email
 - **远端同步**：统一管理 CPA / Sub2API 开关和连接信息
 - **代理 / 高级**：低频 Playwright 代理配置，默认折叠
 - **安全 / 访问控制**：单独管理 `API_KEY`
 - **管理员 / 主号**：管理员登录、主号 Codex 登录 / 同步
 - **巡检设置**：自动巡检间隔、阈值、触发数量
 - **源文件编辑**：直接编辑完整 `.env`
+
+### 邮箱服务提供者
+
+当前支持两种邮箱后端：
+
+- **CloudMail**
+- **Cloudflare Temp Email**
+
+通过下面的配置切换默认新建账号使用的邮箱服务：
+
+```env
+MAIL_PROVIDER=cloudmail
+```
+
+或：
+
+```env
+MAIL_PROVIDER=cloudflare_temp_email
+```
+
+#### 混合使用说明
+
+- **新建账号**：始终使用当前 `MAIL_PROVIDER`
+- **复用旧账号**：按账号自身保存的 `mail_provider` 选择原来的邮箱后端
+- 因此两套配置可以同时保留，便于账号池混合复用
+
+#### Cloudflare Temp Email 注意事项
+
+`CF_TEMP_EMAIL_BASE_URL` 必须填写 **后端 API 根地址**，不是前端管理面板地址。
+
+正确示例：
+
+```env
+CF_TEMP_EMAIL_BASE_URL=https://temp-email-api.example.com
+```
+
+或：
+
+```env
+CF_TEMP_EMAIL_BASE_URL=https://xxxxx.workers.dev
+```
+
+错误示例：
+
+```env
+CF_TEMP_EMAIL_BASE_URL=https://tempmail-xxx.pages.dev/admin
+CF_TEMP_EMAIL_BASE_URL=https://tempmail-xxx.pages.dev/admin/dashboard
+```
+
+如果你的 Cloudflare Temp Email 是前后端分离部署，`pages.dev` 通常只是前端页面；AutoTeam 需要的是能直接返回 `/open_api/settings`、`/admin/address` JSON 的后端地址。
 
 ### Sub2API 分组
 
