@@ -62,8 +62,9 @@ cat state.json | python -m json.tool
 
 ### 验证码一直获取失败
 
-- 检查 CloudMail 是否正常
-- 检查邮箱域名 `CLOUDMAIL_DOMAIN`
+- 检查当前邮箱服务是否正常
+- 如果使用 CloudMail：检查 `CLOUDMAIL_DOMAIN`
+- 如果使用 Cloudflare Temp Email：检查 `CF_TEMP_EMAIL_BASE_URL`、`CF_TEMP_EMAIL_ADMIN_PASSWORD`、`CF_TEMP_EMAIL_DOMAIN`
 - 系统会按 **邮件 ID** 跳过已经尝试过的验证码邮件，而不是按 6 位数字去重
 - 如果浏览器长时间停在 `email-verification`，通常说明新的验证码邮件没有到达，或拿到的是旧邮件
 

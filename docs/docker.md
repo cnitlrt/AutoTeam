@@ -62,7 +62,7 @@ http://host:8787
 
 ## 宿主机服务访问
 
-如果你在 **Linux + Docker** 环境中，需要让容器访问宿主机上的代理、CloudMail 或 CPA，建议在 `docker-compose.yml` 中加入：
+如果你在 **Linux + Docker** 环境中，需要让容器访问宿主机上的代理、邮箱服务或远端同步服务，建议在 `docker-compose.yml` 中加入：
 
 ```yaml
 services:
@@ -105,7 +105,7 @@ docker compose logs
 
 通常是：
 - 配置缺失
-- CloudMail / CPA 连通性验证失败
+- 邮箱服务 / 远端同步服务连通性验证失败
 
 ### `data` 目录没有写权限
 

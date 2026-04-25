@@ -14,37 +14,34 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 
+[快速开始](#快速开始) · [文档](#文档) · [配置说明](docs/configuration.md) · [Docker 部署](docs/docker.md) · [常见问题](docs/troubleshooting.md)
+
 </div>
 
 ---
 
 > **免责声明**：本项目仅供学习和研究用途。使用本工具可能违反 OpenAI 的服务条款，包括但不限于自动化操作、多账号管理等。使用者需自行承担所有风险，包括账号封禁、IP 限制等后果。作者不对任何因使用本工具造成的损失承担责任。
 
-## 它能做什么
+## 核心能力
 
-| 功能 | 描述 |
-|---|---|
-| 📧 自动注册 | 自动注册 Team 账号并获取 Codex 认证 |
-| 🔄 智能轮转 | 按额度自动轮转、补位、复用旧号 |
-| 🔍 自动巡检 | 自动检查额度并触发轮转 |
-| ☁️ 远端同步 | 同步认证到 **CLIProxyAPI / Sub2API** |
-| 🔐 OAuth 导入 | 支持手动接管 OAuth 流程导入账号 |
+| 类型 | 功能 | 说明 |
+|---|---|---|
+| 📧 | 自动注册 | 自动注册 Team 账号并获取 Codex 认证 |
+| 🔄 | 智能轮转 | 按额度自动轮转、补位、复用旧号 |
+| 🔍 | 自动巡检 | 自动检查额度并触发轮转 |
+| ☁️ | 远端同步 | 同步认证到 **CLIProxyAPI / Sub2API** |
+| 🔐 | OAuth 导入 | 支持手动接管 OAuth 流程导入账号 |
 
 ## 支持的外部组件
 
-### 邮箱服务
-
-- [CloudMail](https://github.com/maillab/cloud-mail)
-- [Cloudflare Temp Email](https://github.com/dreamhunter2333/cloudflare_temp_email)
-
-### 远端同步
-
-- [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
-- [Sub2API](https://github.com/Wei-Shaw/sub2api)
+| 分类 | 项目 |
+|---|---|
+| 邮箱服务 | [CloudMail](https://github.com/maillab/cloud-mail), [Cloudflare Temp Email](https://github.com/dreamhunter2333/cloudflare_temp_email) |
+| 远端同步 | [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), [Sub2API](https://github.com/Wei-Shaw/sub2api) |
 
 ## 快速开始
 
-### 安装
+### 1. 安装
 
 ```bash
 # Linux
@@ -55,7 +52,7 @@ uv sync
 uv run playwright install chromium
 ```
 
-### 启动
+### 2. 启动
 
 ```bash
 # Web 面板 + API（推荐）
@@ -64,6 +61,8 @@ uv run autoteam api
 # 或直接轮转
 uv run autoteam rotate
 ```
+
+### 3. 继续配置
 
 首次启动只强制要求 `API_KEY`。  
 邮箱服务、远端同步、代理等运行项都可以在登录后去配置面板里继续填写。
@@ -83,49 +82,18 @@ docker compose up -d
 - **远端同步**：可启用 **CPA**、**Sub2API**，也可同时启用
 - **代理配置**：低频项，建议按需填写
 
-### Cloudflare Temp Email 注意事项
-
-`CF_TEMP_EMAIL_BASE_URL` 必须填写 **后端 API 根地址**，不要填写前端管理页地址。
-
-正确示例：
-
-```env
-CF_TEMP_EMAIL_BASE_URL=https://temp-email-api.example.com
-```
-
-错误示例：
-
-```env
-CF_TEMP_EMAIL_BASE_URL=https://tempmail-xxx.pages.dev/admin
-CF_TEMP_EMAIL_BASE_URL=https://tempmail-xxx.pages.dev/admin/dashboard
-```
-
-## 常用命令
-
-| 命令 | 说明 |
-|---|---|
-| `uv run autoteam api` | 启动 Web 面板 |
-| `uv run autoteam rotate 5` | 智能轮转到目标人数 |
-| `uv run autoteam check` | 检查 active 账号额度 |
-| `uv run autoteam add` | 添加新账号 |
-| `uv run autoteam fill 5` | 补满成员 |
-| `uv run autoteam cleanup 5` | 清理多余成员 |
-| `uv run autoteam sync` | 同步到已启用远端 |
-| `uv run autoteam pull-cpa` | 从 CPA 拉回本地 |
-| `uv run autoteam admin-login` | 管理员登录 |
-
 ## 文档
 
-README 只保留概览，详细说明请直接看 docs：
+README 只保留概览，详细说明统一放到 `docs/`：
 
-- [从零开始部署](docs/getting-started.md)
-- [配置说明](docs/configuration.md)
-- [Docker 部署](docs/docker.md)
-- [API 文档](docs/api.md)
-- [工作原理](docs/architecture.md)
-- [常见问题](docs/troubleshooting.md)
-
-其中 Web 面板的页面划分与职责说明，见 [工作原理](docs/architecture.md)。
+| 文档 | 内容 |
+|---|---|
+| [从零开始部署](docs/getting-started.md) | 安装、配置、管理员登录、首次轮转 |
+| [配置说明](docs/configuration.md) | `.env`、配置面板、邮箱服务、远端同步、代理 |
+| [Docker 部署](docs/docker.md) | Docker Compose、数据目录、宿主机服务访问 |
+| [API 文档](docs/api.md) | HTTP 接口与调用方式 |
+| [工作原理](docs/architecture.md) | 轮转流程、状态机、同步模型、前端结构 |
+| [常见问题](docs/troubleshooting.md) | 登录、代理、验证码、轮转、Docker 排障 |
 
 ## 已知限制
 

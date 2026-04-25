@@ -2,7 +2,7 @@
 
 ## `.env` 配置项
 
-首次运行任何命令时会自动进入配置向导。现在启动阶段只强制要求 `API_KEY`，CloudMail、CPA / Sub2API、代理等运行项也可以在登录后去配置面板补充。只有执行对应功能时，系统才会校验对应配置。也可以手动编辑：
+首次运行任何命令时会自动进入配置向导。现在启动阶段只强制要求 `API_KEY`，邮箱服务、CPA / Sub2API、代理等运行项也可以在登录后去配置面板补充。只有执行对应功能时，系统才会校验对应配置。也可以手动编辑：
 
 ```bash
 cp .env.example .env
@@ -10,10 +10,14 @@ cp .env.example .env
 
 | 配置项 | 说明 | 何时需要 |
 |--------|------|------|
+| `MAIL_PROVIDER` | 当前邮箱服务提供者（`cloudmail` / `cloudflare_temp_email`） | 账号池操作时建议显式填写 |
 | `CLOUDMAIL_BASE_URL` | CloudMail API 地址 | 账号池操作时必填 |
 | `CLOUDMAIL_EMAIL` | CloudMail 登录邮箱 | 账号池操作时必填 |
 | `CLOUDMAIL_PASSWORD` | CloudMail 登录密码 | 账号池操作时必填 |
 | `CLOUDMAIL_DOMAIN` | 临时邮箱域名（如 `@example.com`） | 账号池操作时必填 |
+| `CF_TEMP_EMAIL_BASE_URL` | Cloudflare Temp Email 后端 API 根地址 | 使用 Cloudflare Temp Email 时必填 |
+| `CF_TEMP_EMAIL_ADMIN_PASSWORD` | Cloudflare Temp Email 管理员密码 | 使用 Cloudflare Temp Email 时必填 |
+| `CF_TEMP_EMAIL_DOMAIN` | Cloudflare Temp Email 默认邮箱域名 | 使用 Cloudflare Temp Email 时必填 |
 | `SYNC_TARGET_CPA` | 是否启用 CPA 同步（`true/false`） | 否 |
 | `CPA_URL` | CPA（CLIProxyAPI）地址 | 启用 CPA 时必填（默认 `http://127.0.0.1:8317`） |
 | `CPA_KEY` | CPA 管理密钥 | 启用 CPA 时必填 |
@@ -33,17 +37,18 @@ cp .env.example .env
 
 登录 Web 面板后，配置面板已拆成独立分区：
 
-- **CloudMail**
+- **邮箱服务**
 - **远端同步**
-- **代理 / 高级**
 - **安全 / 访问控制**
 - **管理员 / 主号**
 - **巡检设置**
 - **源文件编辑**
+- **代理 / 高级**
 
 其中：
 
 - `API_KEY` 单独放在 **安全 / 访问控制**
+- 邮箱提供者选择、CloudMail / Cloudflare Temp Email 参数放在 **邮箱服务**
 - CPA / Sub2API 开关和连接信息放在 **远端同步**
 - `.env` 原文编辑保留在 **源文件编辑**
 - 代理配置属于低频项，默认折叠
@@ -173,9 +178,10 @@ codex-{email}-{plan_type}-{hash}.json
 
 ## 启动验证
 
-保存运行配置时会按当前已启用目标验证连通性：
+保存运行配置时会按当前邮箱服务 / 已启用目标验证连通性：
 
 - CloudMail：登录 → 创建测试邮箱 → 删除
+- Cloudflare Temp Email：登录 → 创建测试邮箱 → 删除
 - CPA：获取认证文件列表
 - Sub2API：管理员登录 → 获取 OpenAI OAuth 账号列表 → 校验 `SUB2API_GROUP`（如已填写）
 
