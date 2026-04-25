@@ -10,7 +10,7 @@
           </div>
           <h2 class="section-heading">配置面板</h2>
           <p class="section-subtitle max-w-2xl">
-            按邮箱服务、远端同步、代理、安全、管理员、巡检和源文件编辑拆成独立分区，避免把所有运行配置堆在一个页面里。
+            按邮箱服务、远端同步、安全、管理员、巡检、源文件编辑和代理拆成独立分区，避免把所有运行配置堆在一个页面里。
           </p>
         </div>
 
@@ -23,7 +23,7 @@
         <div class="glass-card-soft p-4">
           <div class="text-2xl">🧩</div>
           <div class="mt-3 text-sm font-medium text-white">独立配置分区</div>
-          <div class="mt-1 text-xs leading-5 text-slate-400">邮箱服务、同步、代理、安全分别独立，不再混在一张表单里。</div>
+            <div class="mt-1 text-xs leading-5 text-slate-400">邮箱服务、同步、安全等高频项前置，低频代理项后置，不再混在一张表单里。</div>
         </div>
         <div class="glass-card-soft p-4">
           <div class="text-2xl">☁️</div>
@@ -490,11 +490,11 @@ const runtimeCategoryMeta = {
 const visualCategories = [
   { key: 'cloudmail', label: '邮箱服务', icon: '📧' },
   { key: 'sync', label: '远端同步', icon: '☁️' },
-  { key: 'proxy', label: '代理 / 高级', icon: '🛰️' },
   { key: 'security', label: '安全 / 访问控制', icon: '🔐' },
   { key: 'admin', label: '管理员 / 主号', icon: '👤' },
   { key: 'auto-check', label: '巡检设置', icon: '🔄' },
   { key: 'source', label: '源文件编辑', icon: '📝' },
+  { key: 'proxy', label: '代理 / 高级', icon: '🛰️' },
 ]
 
 const visualCategory = ref('cloudmail')

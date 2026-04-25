@@ -209,13 +209,30 @@ def _require_runtime_configs(
     raise HTTPException(status_code=400, detail=f"{action_label} 前请先在配置面板填写：{detail}")
 
 
+def _require_mail_provider_configs(
+    action_label: str, *, provider: str | None = None, env: dict[str, str] | None = None
+):
+    from autoteam.mail_provider import get_mail_provider_name, get_mail_provider_prompt, get_mail_provider_required_keys
+
+    env_values = env or _current_runtime_env()
+    resolved_provider = provider or get_mail_provider_name(env_values)
+    missing = _missing_runtime_configs(get_mail_provider_required_keys(resolved_provider), env=env_values)
+    if not missing:
+        return
+
+    detail = _format_missing_runtime_configs(missing)
+    provider_label = get_mail_provider_prompt(resolved_provider)
+    raise HTTPException(
+        status_code=400,
+        detail=f"{action_label} 前请先在配置面板填写当前邮箱服务（{provider_label}）配置：{detail}",
+    )
+
+
 def _require_pool_operation_configs(action_label: str):
-    from autoteam.mail_provider import get_mail_provider_name, get_mail_provider_required_keys
     from autoteam.sync_targets import get_enabled_sync_targets
 
     env = _current_runtime_env()
-    provider = get_mail_provider_name(env)
-    _require_runtime_configs(get_mail_provider_required_keys(provider), action_label, env=env)
+    _require_mail_provider_configs(action_label, env=env)
 
     enabled_targets = get_enabled_sync_targets(env)
     if not enabled_targets:
@@ -239,10 +256,10 @@ def _require_pool_operation_configs(action_label: str):
 
 
 def _require_account_mail_configs(account: dict, action_label: str):
-    from autoteam.mail_provider import get_account_mail_provider, get_mail_provider_required_keys
+    from autoteam.mail_provider import get_account_mail_provider
 
     provider = get_account_mail_provider(account)
-    _require_runtime_configs(get_mail_provider_required_keys(provider), action_label, env=_current_runtime_env())
+    _require_mail_provider_configs(action_label, provider=provider, env=_current_runtime_env())
 
 
 def _require_cpa_configs(action_label: str):

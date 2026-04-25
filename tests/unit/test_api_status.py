@@ -347,6 +347,7 @@ def test_runtime_env_file_hot_reload_updates_current_process_without_restart(tmp
 def test_pool_task_endpoints_require_cloudmail_config_first(monkeypatch, endpoint, args, action_label):
     monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
     for key in (
+        "MAIL_PROVIDER",
         "CLOUDMAIL_BASE_URL",
         "CLOUDMAIL_EMAIL",
         "CLOUDMAIL_PASSWORD",
@@ -362,6 +363,7 @@ def test_pool_task_endpoints_require_cloudmail_config_first(monkeypatch, endpoin
     assert exc.value.status_code == 400
     assert action_label in exc.value.detail
     assert "配置面板" in exc.value.detail
+    assert "当前邮箱服务（CloudMail）" in exc.value.detail
     assert "CLOUDMAIL_BASE_URL" in exc.value.detail
     assert "CPA_KEY" not in exc.value.detail
 
@@ -397,6 +399,58 @@ def test_pool_task_endpoints_require_enabled_sync_target_after_cloudmail(monkeyp
     assert exc.value.status_code == 400
     assert action_label in exc.value.detail
     assert "远端同步目标" in exc.value.detail
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "args", "action_label"),
+    [
+        ("post_rotate", (api.TaskParams(target=5),), "智能轮转"),
+        ("post_add", (), "添加新账号"),
+        ("post_fill", (api.TaskParams(target=5),), "补满 Team 成员"),
+    ],
+)
+def test_pool_task_endpoints_require_current_cloudflare_temp_email_config(monkeypatch, endpoint, args, action_label):
+    monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
+    monkeypatch.setenv("MAIL_PROVIDER", "cloudflare_temp_email")
+    for key in (
+        "CF_TEMP_EMAIL_BASE_URL",
+        "CF_TEMP_EMAIL_ADMIN_PASSWORD",
+        "CF_TEMP_EMAIL_DOMAIN",
+        "CPA_URL",
+        "CPA_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    with pytest.raises(HTTPException) as exc:
+        getattr(api, endpoint)(*args)
+
+    assert exc.value.status_code == 400
+    assert action_label in exc.value.detail
+    assert "当前邮箱服务（Cloudflare Temp Email）" in exc.value.detail
+    assert "CF_TEMP_EMAIL_BASE_URL" in exc.value.detail
+    assert "CLOUDMAIL_BASE_URL" not in exc.value.detail
+    assert "CPA_KEY" not in exc.value.detail
+
+
+@pytest.mark.parametrize(("endpoint", "args"), [("post_check", ()), ("post_cleanup", (api.CleanupParams(),))])
+def test_check_and_cleanup_do_not_require_mail_provider_config(monkeypatch, endpoint, args):
+    monkeypatch.setattr(api, "_start_task", lambda command, func, params, *task_args, **task_kwargs: {"task_id": "t-1"})
+    monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
+    for key in (
+        "MAIL_PROVIDER",
+        "CLOUDMAIL_BASE_URL",
+        "CLOUDMAIL_EMAIL",
+        "CLOUDMAIL_PASSWORD",
+        "CLOUDMAIL_DOMAIN",
+        "CF_TEMP_EMAIL_BASE_URL",
+        "CF_TEMP_EMAIL_ADMIN_PASSWORD",
+        "CF_TEMP_EMAIL_DOMAIN",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    result = getattr(api, endpoint)(*args)
+
+    assert result["task_id"] == "t-1"
 
 
 @pytest.mark.parametrize(
