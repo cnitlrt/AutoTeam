@@ -2,31 +2,73 @@
 
 ## `.env` 配置项
 
-首次运行任何命令时会自动进入配置向导。现在启动阶段只强制要求 `API_KEY`，CloudMail、CPA / Sub2API、代理等运行项也可以在登录后去配置面板补充。也可以手动编辑：
+首次运行任何命令时会自动进入配置向导。现在启动阶段只强制要求 `API_KEY`，CloudMail、CPA / Sub2API、代理等运行项也可以在登录后去配置面板补充。只有执行对应功能时，系统才会校验对应配置。也可以手动编辑：
 
 ```bash
 cp .env.example .env
 ```
 
-| 配置项 | 说明 | 必填 |
+| 配置项 | 说明 | 何时需要 |
 |--------|------|------|
-| `CLOUDMAIL_BASE_URL` | CloudMail API 地址 | 是 |
-| `CLOUDMAIL_EMAIL` | CloudMail 登录邮箱 | 是 |
-| `CLOUDMAIL_PASSWORD` | CloudMail 登录密码 | 是 |
-| `CLOUDMAIL_DOMAIN` | 临时邮箱域名（如 `@example.com`） | 是 |
+| `CLOUDMAIL_BASE_URL` | CloudMail API 地址 | 账号池操作时必填 |
+| `CLOUDMAIL_EMAIL` | CloudMail 登录邮箱 | 账号池操作时必填 |
+| `CLOUDMAIL_PASSWORD` | CloudMail 登录密码 | 账号池操作时必填 |
+| `CLOUDMAIL_DOMAIN` | 临时邮箱域名（如 `@example.com`） | 账号池操作时必填 |
 | `SYNC_TARGET_CPA` | 是否启用 CPA 同步（`true/false`） | 否 |
-| `CPA_URL` | CLIProxyAPI 地址 | 启用 CPA 时必填（默认 `http://127.0.0.1:8317`） |
+| `CPA_URL` | CPA（CLIProxyAPI）地址 | 启用 CPA 时必填（默认 `http://127.0.0.1:8317`） |
 | `CPA_KEY` | CPA 管理密钥 | 启用 CPA 时必填 |
 | `SYNC_TARGET_SUB2API` | 是否启用 Sub2API 同步（`true/false`） | 否 |
 | `SUB2API_URL` | Sub2API 地址 | 启用 Sub2API 时必填 |
 | `SUB2API_EMAIL` | Sub2API 管理员邮箱 | 启用 Sub2API 时必填 |
 | `SUB2API_PASSWORD` | Sub2API 管理员密码 | 启用 Sub2API 时必填 |
-| `API_KEY` | Web 面板 / API 鉴权密钥 | 是（首次启动可自动生成） |
+| `SUB2API_GROUP` | Sub2API 分组名或分组 ID，多个用逗号分隔 | 启用 Sub2API 且希望自动加入分组时填写 |
+| `API_KEY` | Web 面板 / API 鉴权密钥 | 启动时必填（首次启动可自动生成） |
 | `PLAYWRIGHT_PROXY_URL` | Playwright 浏览器代理 URL，如 `socks5://host:port` 或 `http://user:pass@host:port` | 否 |
 | `PLAYWRIGHT_PROXY_BYPASS` | Playwright 代理绕过列表，如 `localhost,127.0.0.1` | 否 |
 | `AUTO_CHECK_THRESHOLD` | 额度低于此百分比触发轮转 | 否（默认 `10`） |
 | `AUTO_CHECK_INTERVAL` | 巡检间隔（秒） | 否（默认 `300`） |
 | `AUTO_CHECK_MIN_LOW` | 至少几个账号低于阈值才触发 | 否（默认 `2`） |
+
+## 配置面板分区
+
+登录 Web 面板后，配置面板已拆成独立分区：
+
+- **CloudMail**
+- **远端同步**
+- **代理 / 高级**
+- **安全 / 访问控制**
+- **管理员 / 主号**
+- **巡检设置**
+- **源文件编辑**
+
+其中：
+
+- `API_KEY` 单独放在 **安全 / 访问控制**
+- CPA / Sub2API 开关和连接信息放在 **远端同步**
+- `.env` 原文编辑保留在 **源文件编辑**
+- 代理配置属于低频项，默认折叠
+
+## Sub2API 分组
+
+如果希望同步到 Sub2API 的账号自动加入指定分组，可以设置：
+
+```dotenv
+SUB2API_GROUP=Team Pool
+```
+
+也可以填写分组 ID，或多个分组：
+
+```dotenv
+SUB2API_GROUP=12,Team Pool
+```
+
+说明：
+
+- 支持 **分组名** 或 **分组 ID**
+- 多个分组用英文逗号分隔
+- 同步账号池账号时会自动带上这些分组
+- 同步主号 Codex 到 Sub2API 时也会自动带上这些分组
+- 更新时会保留账号原本手动绑定的其他分组，只替换 AutoTeam 自己管理的分组绑定
 
 ## Playwright 代理
 
@@ -63,7 +105,7 @@ Windows / macOS 下也会按 UTF-8 正常读取。
 
 ## 管理员登录态
 
-首次启动后，在 Web 面板「设置」页或命令行完成主号登录：
+首次启动后，在 Web 面板「配置面板 → 管理员 / 主号」或命令行完成主号登录：
 
 ```bash
 uv run autoteam admin-login
@@ -135,6 +177,6 @@ codex-{email}-{plan_type}-{hash}.json
 
 - CloudMail：登录 → 创建测试邮箱 → 删除
 - CPA：获取认证文件列表
-- Sub2API：管理员登录 → 获取 OpenAI OAuth 账号列表
+- Sub2API：管理员登录 → 获取 OpenAI OAuth 账号列表 → 校验 `SUB2API_GROUP`（如已填写）
 
 验证失败会提示具体哪个环节有问题，保存会被拒绝。

@@ -62,7 +62,7 @@ uv run autoteam api
 uv run autoteam rotate
 ```
 
-首次启动只强制要求 API Key。CloudMail、CPA / Sub2API、代理等运行项可以在登录后进入配置面板继续设置。
+首次启动只强制要求 API Key。CloudMail、CPA / Sub2API、代理等运行项可以在登录后进入配置面板继续设置；只有执行对应功能时才会校验相关配置。
 
 ### Docker 部署
 
@@ -119,7 +119,33 @@ PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:3333
 | 🔐 OAuth 登录 | 生成认证链接；优先自动接收 localhost 回调，失败时也可手动粘贴回调 URL |
 | 📜 任务历史 | 查看后台任务执行状态、参数、耗时与结果 |
 | 📋 日志 | 实时日志查看器 |
-| ⚙️ 配置面板 | 运行配置 + 管理员/主号 + 巡检配置 + 源文件编辑 |
+| ⚙️ 配置面板 | CloudMail、远端同步、代理 / 高级、安全 / 访问控制、管理员 / 主号、巡检设置、源文件编辑 |
+
+### 配置面板说明
+
+- **CloudMail**：注册、复用、收验证码所需配置
+- **远端同步**：统一管理 CPA / Sub2API 开关和连接信息
+- **代理 / 高级**：低频 Playwright 代理配置，默认折叠
+- **安全 / 访问控制**：单独管理 `API_KEY`
+- **管理员 / 主号**：管理员登录、主号 Codex 登录 / 同步
+- **巡检设置**：自动巡检间隔、阈值、触发数量
+- **源文件编辑**：直接编辑完整 `.env`
+
+### Sub2API 分组
+
+如果启用了 Sub2API，同步时可以额外配置：
+
+```env
+SUB2API_GROUP=Team Pool
+```
+
+也可以填分组 ID，或多个分组（逗号分隔）：
+
+```env
+SUB2API_GROUP=12,Team Pool
+```
+
+同步到 Sub2API 的账号（包括账号池账号和主号 Codex）会自动加入这些分组。
 
 ## 文档
 
