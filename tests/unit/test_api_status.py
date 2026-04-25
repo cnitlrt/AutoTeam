@@ -9,6 +9,16 @@ from fastapi import HTTPException
 from autoteam import api
 
 
+def _set_pool_runtime_config(monkeypatch):
+    monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
+    monkeypatch.setenv("CLOUDMAIL_BASE_URL", "http://mail.example.com")
+    monkeypatch.setenv("CLOUDMAIL_EMAIL", "admin@example.com")
+    monkeypatch.setenv("CLOUDMAIL_PASSWORD", "secret")
+    monkeypatch.setenv("CLOUDMAIL_DOMAIN", "@example.com")
+    monkeypatch.setenv("CPA_URL", "http://127.0.0.1:8317")
+    monkeypatch.setenv("CPA_KEY", "key-1")
+
+
 def test_get_status_normalizes_main_account_status_from_saved_auth(tmp_path, monkeypatch):
     main_email = "owner@example.com"
     auth_file = tmp_path / "codex-main.json"
@@ -404,6 +414,7 @@ def test_auto_check_persists_reuse_blocking_metadata_before_rotate(tmp_path, mon
     def fake_update_account(email, **kwargs):
         updates.append((email, kwargs))
 
+    _set_pool_runtime_config(monkeypatch)
     monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2})
     monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
     monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
@@ -483,6 +494,7 @@ def test_auto_check_falls_back_when_ok_quota_has_no_reset_time(tmp_path, monkeyp
     def fake_update_account(email, **kwargs):
         updates.append((email, kwargs))
 
+    _set_pool_runtime_config(monkeypatch)
     monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 1})
     monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
     monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
@@ -527,6 +539,7 @@ def test_auto_check_falls_back_when_exhausted_quota_has_no_reset_time(tmp_path, 
     def fake_update_account(email, **kwargs):
         updates.append((email, kwargs))
 
+    _set_pool_runtime_config(monkeypatch)
     monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 1})
     monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
     monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
@@ -593,6 +606,7 @@ def test_auto_check_triggers_rotate_when_active_count_is_below_target(tmp_path, 
             }
         )
 
+    _set_pool_runtime_config(monkeypatch)
     monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2})
     monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
     monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
