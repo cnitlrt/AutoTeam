@@ -33,6 +33,11 @@ _AUTH_SKIP_PATHS = {"/api/auth/check", "/api/setup/status", "/api/setup/save"}
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
+    try:
+        _maybe_reload_runtime_config_from_env_file()
+    except Exception as exc:
+        logger.warning("[配置] 自动热加载失败: %s", exc)
+
     path = request.url.path
     # 不鉴权的路径：非 /api 路径、auth/check 端点
     if not path.startswith("/api/") or path in _AUTH_SKIP_PATHS:
@@ -96,6 +101,7 @@ _CLOUDMAIL_REQUIRED_KEYS = (
 )
 _CPA_REQUIRED_KEYS = ("CPA_URL", "CPA_KEY")
 _POOL_OPERATION_REQUIRED_KEYS = (*_CLOUDMAIL_REQUIRED_KEYS, *_CPA_REQUIRED_KEYS)
+_RUNTIME_PANEL_REQUIRED_KEYS = (*_POOL_OPERATION_REQUIRED_KEYS, "API_KEY")
 
 _ALL_RUNTIME_ENV_KEYS = [
     "CLOUDMAIL_BASE_URL",
@@ -117,6 +123,9 @@ _ALL_RUNTIME_ENV_KEYS = [
     "PLAYWRIGHT_PROXY_PASSWORD",
     "PLAYWRIGHT_PROXY_BYPASS",
 ]
+_RUNTIME_ENV_BASE = {key: os.environ.get(key) for key in _ALL_RUNTIME_ENV_KEYS}
+_runtime_env_reload_lock = threading.Lock()
+_runtime_env_reload_state = {"signature": None}
 
 
 def _runtime_config_prompt_map():
@@ -177,6 +186,7 @@ def _collect_config_fields(*, include_values: bool = False, configs=None):
         }
         if include_values:
             field["value"] = raw_value or (default if key == "CPA_URL" else "")
+            field["runtime_required"] = key in _RUNTIME_PANEL_REQUIRED_KEYS
         fields.append(field)
     return {"configured": all_ok, "fields": fields}
 
@@ -204,6 +214,23 @@ def _restore_runtime_env(previous_env: dict[str, str | None]):
             os.environ.pop(key, None)
         else:
             os.environ[key] = previous
+
+
+def _runtime_env_file_signature():
+    from autoteam.setup_wizard import ENV_FILE
+
+    if not ENV_FILE.exists():
+        return None
+    stat = ENV_FILE.stat()
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _read_runtime_env_file_text():
+    from autoteam.setup_wizard import ENV_FILE
+
+    if not ENV_FILE.exists():
+        return ""
+    return read_text(ENV_FILE)
 
 
 def _read_runtime_source_text():
@@ -244,6 +271,19 @@ def _load_env_values_from_source(content: str, env_keys: list[str]):
     return values
 
 
+def _load_present_env_values_from_source(content: str, env_keys: list[str]):
+    allowed = set(env_keys)
+    values = {}
+    for line in content.splitlines():
+        parsed = parse_env_line(line)
+        if not parsed:
+            continue
+        key, value = parsed
+        if key in allowed:
+            values[key] = value
+    return values
+
+
 def _validate_runtime_required_values(values: dict[str, str]):
     from autoteam.setup_wizard import STARTUP_REQUIRED_CONFIGS
 
@@ -274,6 +314,55 @@ def _sync_runtime_globals():
             auto_check_restart.set()
     except Exception:
         pass
+
+
+def _apply_runtime_env_file_values(values: dict[str, str]):
+    for key in _ALL_RUNTIME_ENV_KEYS:
+        if key in values:
+            value = values[key]
+            if value:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+            continue
+
+        base_value = _RUNTIME_ENV_BASE.get(key)
+        if base_value:
+            os.environ[key] = base_value
+        else:
+            os.environ.pop(key, None)
+
+
+def _sync_runtime_env_reload_state():
+    with _runtime_env_reload_lock:
+        _runtime_env_reload_state["signature"] = _runtime_env_file_signature()
+
+
+def _maybe_reload_runtime_config_from_env_file(*, force: bool = False):
+    signature = _runtime_env_file_signature()
+
+    with _runtime_env_reload_lock:
+        previous_signature = _runtime_env_reload_state.get("signature")
+        if not force and signature == previous_signature:
+            return False
+
+        previous_env = {key: os.environ.get(key) for key in _ALL_RUNTIME_ENV_KEYS}
+        try:
+            content = _read_runtime_env_file_text()
+            values = _load_present_env_values_from_source(content, _ALL_RUNTIME_ENV_KEYS)
+            _apply_runtime_env_file_values(values)
+            _reload_runtime_config_modules()
+            _sync_runtime_globals()
+            _runtime_env_reload_state["signature"] = signature
+        except Exception:
+            _restore_runtime_env(previous_env)
+            _reload_runtime_config_modules()
+            _sync_runtime_globals()
+            raise
+
+    if previous_signature is not None and signature != previous_signature:
+        logger.info("[配置] 检测到 .env 变更，已自动热加载")
+    return True
 
 
 def _verify_runtime_integrations(previous_env: dict[str, str | None] | None = None):
@@ -339,6 +428,7 @@ def _save_runtime_config(data: dict[str, str]):
             if value or key in _RUNTIME_CONFIG_CLEARABLE_FIELDS:
                 _write_env(key, value)
 
+        _sync_runtime_env_reload_state()
         _sync_runtime_globals()
         return {"message": "配置保存成功", "api_key": API_KEY, "configured": True}
     except Exception:
@@ -420,6 +510,7 @@ def put_runtime_config_source(config: SourceConfig):
             _reload_runtime_config_modules()
             return verify_result
 
+        _sync_runtime_env_reload_state()
         _sync_runtime_globals()
         return {
             "message": "源文件保存成功",
@@ -1965,6 +2056,11 @@ def _auto_check_wait(interval_seconds, poll_seconds=0.2):
     deadline = time.monotonic() + interval
 
     while True:
+        try:
+            _maybe_reload_runtime_config_from_env_file()
+        except Exception as exc:
+            logger.warning("[配置] 自动热加载失败: %s", exc)
+
         if _auto_check_restart.is_set():
             _auto_check_restart.clear()
             return "restart"
@@ -1988,6 +2084,11 @@ def _auto_check_loop():
     target_seats = 5
 
     while not _auto_check_stop.is_set():
+        try:
+            _maybe_reload_runtime_config_from_env_file()
+        except Exception as exc:
+            logger.warning("[配置] 自动热加载失败: %s", exc)
+
         cfg = _auto_check_config
         logger.info(
             "[巡检] 等待 %d 分钟后执行下一轮检查（阈值: %d%%, 触发: >=%d 个）",
@@ -2215,6 +2316,7 @@ def _start_auto_check():
     except Exception as exc:
         logger.warning("[启动] 修复 auths 认证文件权限失败: %s", exc)
 
+    _sync_runtime_env_reload_state()
     thread = threading.Thread(target=_auto_check_loop, daemon=True)
     thread.start()
 

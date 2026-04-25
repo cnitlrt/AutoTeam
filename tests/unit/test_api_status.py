@@ -10,6 +10,7 @@ from autoteam import api
 
 
 def _set_pool_runtime_config(monkeypatch):
+    monkeypatch.setattr(api, "_maybe_reload_runtime_config_from_env_file", lambda *args, **kwargs: False)
     monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
     monkeypatch.setenv("CLOUDMAIL_BASE_URL", "http://mail.example.com")
     monkeypatch.setenv("CLOUDMAIL_EMAIL", "admin@example.com")
@@ -185,10 +186,14 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
 
     assert result["configured"] is True
     assert fields["CLOUDMAIL_EMAIL"]["value"] == "admin@example.com"
+    assert fields["CLOUDMAIL_EMAIL"]["runtime_required"] is True
     assert fields["CPA_KEY"]["value"] == "key-1"
+    assert fields["CPA_KEY"]["runtime_required"] is True
     assert fields["PLAYWRIGHT_PROXY_URL"]["value"] == "socks5://127.0.0.1:1080"
+    assert fields["PLAYWRIGHT_PROXY_URL"]["runtime_required"] is False
     assert fields["PLAYWRIGHT_PROXY_BYPASS"]["value"] == "localhost,127.0.0.1"
     assert fields["API_KEY"]["value"] == "runtime-key"
+    assert fields["API_KEY"]["runtime_required"] is True
 
 
 def test_put_runtime_config_allows_partial_runtime_fields_when_api_key_exists(monkeypatch):
@@ -248,6 +253,46 @@ def test_get_runtime_config_source_returns_env_content(tmp_path, monkeypatch):
     assert result["path"].endswith(".env")
     assert "CLOUDMAIL_EMAIL=admin@example.com" in result["content"]
     assert "API_KEY=test-key" in result["content"]
+
+
+def test_runtime_env_file_hot_reload_updates_current_process_without_restart(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "CPA_URL=http://100.78.125.121:8317",
+                "API_KEY=new-key",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("autoteam.setup_wizard.ENV_FILE", env_file)
+    monkeypatch.setattr(
+        api,
+        "_RUNTIME_ENV_BASE",
+        {
+            "CPA_URL": "http://127.0.0.1:8317",
+            "CPA_KEY": "external-key",
+            "API_KEY": "old-key",
+        },
+    )
+    monkeypatch.setattr(api, "_runtime_env_reload_state", {"signature": None})
+    monkeypatch.setattr(api, "_reload_runtime_config_modules", lambda: None)
+    monkeypatch.setattr(
+        api, "_sync_runtime_globals", lambda: setattr(api, "API_KEY", api.os.environ.get("API_KEY", ""))
+    )
+
+    monkeypatch.setenv("CPA_URL", "http://127.0.0.1:8317")
+    monkeypatch.setenv("CPA_KEY", "external-key")
+    monkeypatch.setenv("API_KEY", "old-key")
+
+    changed = api._maybe_reload_runtime_config_from_env_file(force=True)
+
+    assert changed is True
+    assert api.os.environ["CPA_URL"] == "http://100.78.125.121:8317"
+    assert api.os.environ["CPA_KEY"] == "external-key"
+    assert api.API_KEY == "new-key"
 
 
 @pytest.mark.parametrize(
@@ -359,6 +404,7 @@ def test_auto_check_skips_rotate_when_pool_configs_are_missing(tmp_path, monkeyp
     monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 1})
     monkeypatch.setattr(api, "_auto_check_stop", threading.Event())
     monkeypatch.setattr(api, "_auto_check_restart", threading.Event())
+    monkeypatch.setattr(api, "_maybe_reload_runtime_config_from_env_file", lambda *args, **kwargs: False)
     monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
     monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
     for key in (
