@@ -29,12 +29,26 @@ CLOUDMAIL_EMAIL = os.environ.get("CLOUDMAIL_EMAIL", "")
 CLOUDMAIL_PASSWORD = os.environ.get("CLOUDMAIL_PASSWORD", "")
 CLOUDMAIL_DOMAIN = os.environ.get("CLOUDMAIL_DOMAIN", "")
 
+# 邮箱提供者配置
+MAIL_PROVIDER = os.environ.get("MAIL_PROVIDER", "cloudmail").strip().lower() or "cloudmail"
+
+# Cloudflare Temp Email 配置
+CF_TEMP_EMAIL_BASE_URL = os.environ.get("CF_TEMP_EMAIL_BASE_URL", "")
+CF_TEMP_EMAIL_ADMIN_PASSWORD = os.environ.get("CF_TEMP_EMAIL_ADMIN_PASSWORD", "")
+CF_TEMP_EMAIL_DOMAIN = os.environ.get("CF_TEMP_EMAIL_DOMAIN", "")
+
 # ChatGPT Team 配置
 CHATGPT_ACCOUNT_ID = os.environ.get("CHATGPT_ACCOUNT_ID", "")
 
 # CPA (CLIProxyAPI) 配置
 CPA_URL = os.environ.get("CPA_URL", "")
 CPA_KEY = os.environ.get("CPA_KEY", "")
+
+# Sub2API 配置
+SUB2API_URL = os.environ.get("SUB2API_URL", "")
+SUB2API_EMAIL = os.environ.get("SUB2API_EMAIL", "")
+SUB2API_PASSWORD = os.environ.get("SUB2API_PASSWORD", "")
+SUB2API_GROUP = os.environ.get("SUB2API_GROUP", "")
 
 # 轮询邮件间隔/超时（秒）
 EMAIL_POLL_INTERVAL = _get_int_env("EMAIL_POLL_INTERVAL", 3)

@@ -195,7 +195,7 @@ PLAYWRIGHT_PROXY_URL=http://username:password@host.docker.internal:1080
 
 ### 操作按钮全部禁用
 
-轮转 / 补满 / 清理等账号池操作需要先在「设置」页完成管理员登录。
+轮转 / 补满 / 清理等账号池操作需要先在「配置面板 → 管理员 / 主号」完成管理员登录。
 
 ### Team 成员页的 owner 为什么没有“移出”按钮
 

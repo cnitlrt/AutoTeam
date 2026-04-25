@@ -24,8 +24,8 @@ import time
 from playwright.sync_api import sync_playwright
 
 from autoteam.chatgpt_api import ChatGPTTeamAPI
-from autoteam.cloudmail import CloudMailClient
 from autoteam.config import get_playwright_launch_options
+from autoteam.mail_provider import get_mail_client as CloudMailClient
 
 logger = logging.getLogger(__name__)
 

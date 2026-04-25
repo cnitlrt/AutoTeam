@@ -22,7 +22,7 @@
         {{ message }}
       </div>
       <div v-if="!adminReady" class="mx-4 mt-4 px-4 py-3 rounded-lg text-sm border bg-amber-500/10 text-amber-300 border-amber-500/20">
-        请先在「设置」页完成管理员登录后，才能操作账号。
+        请先在「配置面板」页完成管理员登录后，才能操作账号。
       </div>
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
@@ -350,7 +350,7 @@ async function kickAccount(email) {
 async function removeAccount(email) {
   if (actionDisabled.value) return
 
-  const ok = window.confirm(`确认删除账号 ${email}？\n这会同时清理本地记录、CPA、Team/Invite 和 CloudMail。`)
+  const ok = window.confirm(`确认删除账号 ${email}？\n这会同时清理本地记录、已配置远端、Team/Invite 和 CloudMail。`)
   if (!ok) return
 
   actionEmail.value = email

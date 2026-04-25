@@ -1264,9 +1264,9 @@ class MainCodexSyncFlow(MainCodexLoginFlow):
     def complete(self):
         info = super().complete()
 
-        from autoteam.cpa_sync import sync_main_codex_to_cpa
+        from autoteam.sync_targets import sync_main_codex_to_configured_targets
 
-        sync_main_codex_to_cpa(info["auth_file"])
+        sync_main_codex_to_configured_targets(info["auth_file"])
         return {
             "email": info.get("email"),
             "auth_file": info.get("auth_file"),

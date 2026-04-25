@@ -26,6 +26,8 @@ _VERIFICATION_CODE_PATTERNS = (
 
 
 class CloudMailClient:
+    provider_name = "cloudmail"
+
     def __init__(self):
         self.base_url = CLOUDMAIL_BASE_URL
         self.token = None
@@ -150,7 +152,7 @@ class CloudMailClient:
 
             for acc in load_accounts():
                 if self._normalize_email(acc.get("email")) == target:
-                    account_id = acc.get("cloudmail_account_id")
+                    account_id = acc.get("mail_account_id") or acc.get("cloudmail_account_id")
                     if account_id:
                         return account_id
         except Exception:

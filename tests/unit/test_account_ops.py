@@ -68,3 +68,46 @@ def test_fetch_team_state_raises_readable_error_when_users_auth_fails(monkeypatc
 
     with pytest.raises(RuntimeError, match="请重新完成管理员登录"):
         account_ops.fetch_team_state(chatgpt)
+
+
+def test_delete_managed_account_uses_generic_mail_provider_fields(tmp_path, monkeypatch):
+    auth_dir = tmp_path / "auths"
+    auth_dir.mkdir()
+    auth_file = auth_dir / "codex-user@example.com-team.json"
+    auth_file.write_text("{}", encoding="utf-8")
+
+    accounts = [
+        {
+            "email": "user@example.com",
+            "status": "standby",
+            "auth_file": str(auth_file),
+            "mail_provider": "cloudflare_temp_email",
+            "mail_account_id": 55,
+            "cloudmail_account_id": None,
+        }
+    ]
+    deleted = []
+
+    class _FakeMailClient:
+        provider_name = "cloudflare_temp_email"
+
+        def delete_account(self, account_id):
+            deleted.append(account_id)
+            return {"code": 200}
+
+    monkeypatch.setattr(account_ops, "AUTH_DIR", auth_dir)
+    monkeypatch.setattr(account_ops, "load_accounts", lambda: list(accounts))
+    monkeypatch.setattr(account_ops, "save_accounts", lambda items: accounts.clear() or accounts.extend(items))
+    monkeypatch.setattr(account_ops, "delete_account_from_configured_targets", lambda *args, **kwargs: {})
+    monkeypatch.setattr(account_ops, "sync_to_cpa", lambda: None)
+
+    cleanup = account_ops.delete_managed_account(
+        "user@example.com",
+        remove_remote=False,
+        mail_client=_FakeMailClient(),
+        sync_cpa_after=False,
+    )
+
+    assert deleted == [55]
+    assert cleanup["local_record"] is True
+    assert cleanup["cloudmail_deleted"] is True

@@ -4,7 +4,7 @@
 
 **面向 ChatGPT Team 的账号轮转与认证同步工具**
 
-自动注册账号、获取 Codex 认证、按额度轮转席位，并与 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 双向同步认证文件。
+自动注册账号、获取 Codex 认证、按额度轮转席位，并把认证同步到 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) / Sub2API。
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![Playwright](https://img.shields.io/badge/Playwright-Chromium-2EAD33?style=for-the-badge&logo=playwright&logoColor=white)](https://playwright.dev)
@@ -28,8 +28,8 @@
 | 🔐 | **Codex OAuth** | 自动登录 Codex，无密码时可走邮箱验证码 |
 | 🔑 | **手动 OAuth 导入** | 支持 localhost 自动回调，也支持手动粘贴回调 URL |
 | 🔄 | **智能轮转** | 额度不足自动移出，旧号恢复后优先复用 |
-| ☁️ | **CPA 双向同步** | 本地 active 上传到 CPA，也可从 CPA 反向导入 |
-| 🖥️ | **Web 面板** | 仪表盘、同步中心、OAuth 登录、任务历史、日志、设置 |
+| ☁️ | **多远端同步** | 支持同步到 CPA、Sub2API，CPA 仍支持反向导入 |
+| 🖥️ | **Web 面板** | 仪表盘、同步中心、OAuth 登录、任务历史、日志、配置面板 |
 | 🔍 | **自动巡检** | 后台定时检查额度并触发轮转 |
 | 📤 | **导出认证** | 一键导出 Codex CLI 格式 auth.json，直连 OpenAI 不走代理 |
 | 🐳 | **Docker** | 支持容器部署与数据持久化 |
@@ -62,7 +62,7 @@ uv run autoteam api
 uv run autoteam rotate
 ```
 
-首次启动会自动引导配置 CloudMail、CPA、API Key，并验证连通性。
+首次启动只强制要求 API Key。CloudMail、CPA / Sub2API、代理等运行项可以在登录后进入配置面板继续设置；只有执行对应功能时才会校验相关配置。
 
 ### Docker 部署
 
@@ -100,7 +100,7 @@ PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:3333
 | `manual-add` | 手动 OAuth 添加账号（打开链接登录后粘贴回调 URL） |
 | `fill [N]` | 补满成员 |
 | `cleanup [N]` | 清理多余成员 |
-| `sync` | 同步认证文件到 CPA |
+| `sync` | 同步认证文件到已启用远端 |
 | `pull-cpa` | 从 CPA 反向同步认证文件到本地 |
 | `admin-login` | 管理员登录 |
 
@@ -115,11 +115,37 @@ PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:3333
 | 📊 仪表盘 | 账号统计 + 状态表格 + 登录/移出/删除/同步操作 |
 | 👥 Team 成员 | 全部 Team 成员（含外部成员） |
 | 🔁 账号池操作 | 轮转、检查、补满、添加、清理等会直接改变账号池状态的操作 |
-| 🔄 同步中心 | 同步账号、同步 CPA、拉取 CPA 等对账/同步动作 |
+| 🔄 同步中心 | 同步账号、同步已启用远端、拉取 CPA 等对账/同步动作 |
 | 🔐 OAuth 登录 | 生成认证链接；优先自动接收 localhost 回调，失败时也可手动粘贴回调 URL |
 | 📜 任务历史 | 查看后台任务执行状态、参数、耗时与结果 |
 | 📋 日志 | 实时日志查看器 |
-| ⚙️ 设置 | 管理员登录 + 主号 Codex 同步 + 巡检配置 |
+| ⚙️ 配置面板 | CloudMail、远端同步、代理 / 高级、安全 / 访问控制、管理员 / 主号、巡检设置、源文件编辑 |
+
+### 配置面板说明
+
+- **CloudMail**：注册、复用、收验证码所需配置
+- **远端同步**：统一管理 CPA / Sub2API 开关和连接信息
+- **代理 / 高级**：低频 Playwright 代理配置，默认折叠
+- **安全 / 访问控制**：单独管理 `API_KEY`
+- **管理员 / 主号**：管理员登录、主号 Codex 登录 / 同步
+- **巡检设置**：自动巡检间隔、阈值、触发数量
+- **源文件编辑**：直接编辑完整 `.env`
+
+### Sub2API 分组
+
+如果启用了 Sub2API，同步时可以额外配置：
+
+```env
+SUB2API_GROUP=Team Pool
+```
+
+也可以填分组 ID，或多个分组（逗号分隔）：
+
+```env
+SUB2API_GROUP=12,Team Pool
+```
+
+同步到 Sub2API 的账号（包括账号池账号和主号 Codex）会自动加入这些分组。
 
 ## 文档
 
@@ -135,7 +161,7 @@ PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:3333
 ## 适用场景
 
 - 需要维持固定数量的 Team 可用席位
-- 需要把 Codex 认证文件同步到 CLIProxyAPI
+- 需要把 Codex 认证文件同步到 CLIProxyAPI / Sub2API
 - 需要在 Web 面板里完成日常轮转、对账、OAuth 导入
 
 ## 已知限制

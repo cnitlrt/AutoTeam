@@ -471,6 +471,8 @@ def sync_from_cpa():
                 {
                     "email": email,
                     "password": "",
+                    "mail_provider": "",
+                    "mail_account_id": None,
                     "cloudmail_account_id": None,
                     "status": STATUS_STANDBY,
                     "auth_file": resolved_path,

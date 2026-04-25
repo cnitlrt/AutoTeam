@@ -22,6 +22,10 @@ Authorization: Bearer <API_KEY>
 | GET | `/api/auth/check` | 验证 API Key |
 | GET | `/api/setup/status` | 检查配置是否完整 |
 | POST | `/api/setup/save` | 保存初始配置 |
+| GET | `/api/config/runtime` | 获取运行配置字段 |
+| PUT | `/api/config/runtime` | 保存运行配置 |
+| GET | `/api/config/source` | 读取 `.env` 源文件 |
+| PUT | `/api/config/source` | 保存 `.env` 源文件 |
 | GET | `/api/status` | 账号状态 + 实时额度 |
 | GET | `/api/accounts` | 所有账号列表 |
 | GET | `/api/accounts/active` | 活跃账号 |
@@ -32,7 +36,7 @@ Authorization: Bearer <API_KEY>
 | GET | `/api/cpa/files` | CPA 认证文件列表 |
 | GET | `/api/config/auto-check` | 巡检配置 |
 | PUT | `/api/config/auto-check` | 修改巡检配置（运行时生效） |
-| POST | `/api/sync` | 同步 active 认证文件到 CPA |
+| POST | `/api/sync` | 同步 active 认证文件到已启用远端 |
 | POST | `/api/sync/from-cpa` | 从 CPA 反向同步认证文件到本地（含去重） |
 | POST | `/api/sync/accounts` | 从 Team / auths 对账到本地账号池 |
 | POST | `/api/accounts/{email}/kick` | 将 active 账号移出 Team |
@@ -89,7 +93,7 @@ Authorization: Bearer <API_KEY>
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/main-codex/status` | 同步状态 |
-| POST | `/api/main-codex/start` | 开始同步 |
+| POST | `/api/main-codex/start` | 开始登录并同步到已启用远端 |
 | POST | `/api/main-codex/password` | 提交密码 |
 | POST | `/api/main-codex/code` | 提交验证码 |
 | POST | `/api/main-codex/cancel` | 取消同步 |

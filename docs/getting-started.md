@@ -143,7 +143,7 @@ PLAYWRIGHT_PROXY_URL=http://username:password@host.docker.internal:1080
 
 1. 打开 `http://your-server:8787`
 2. 输入 API Key 进入面板
-3. 进入「设置」页
+3. 进入「配置面板 → 管理员 / 主号」
 4. 输入管理员邮箱，点击「开始登录」
 5. 按提示输入密码或邮箱验证码
 6. 选择 Team workspace（如 `Idapro`）

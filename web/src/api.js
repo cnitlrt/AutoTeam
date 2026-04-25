@@ -30,7 +30,7 @@ async function request(method, path, body = null) {
     throw err
   }
   if (!resp.ok) {
-    const msg = data?.detail?.message || data?.detail || `HTTP ${resp.status}`
+    const msg = data?.message || data?.detail?.message || data?.detail || `HTTP ${resp.status}`
     const err = new Error(msg)
     err.status = resp.status
     throw err
@@ -42,6 +42,10 @@ export const api = {
   checkAuth: () => request('GET', '/auth/check'),
   getSetupStatus: () => request('GET', '/setup/status'),
   saveSetup: (config) => request('POST', '/setup/save', config),
+  getRuntimeConfig: () => request('GET', '/config/runtime'),
+  saveRuntimeConfig: (config) => request('PUT', '/config/runtime', config),
+  getRuntimeConfigSource: () => request('GET', '/config/source'),
+  saveRuntimeConfigSource: (payload) => request('PUT', '/config/source', payload),
 
   getStatus: () => request('GET', '/status'),
   getAdminStatus: () => request('GET', '/admin/status'),

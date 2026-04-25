@@ -26,7 +26,7 @@ from autoteam.codex_auth import (
     quota_result_resets_at,
     save_auth_file,
 )
-from autoteam.cpa_sync import sync_to_cpa
+from autoteam.sync_targets import sync_to_configured_targets as sync_to_cpa
 
 logger = logging.getLogger(__name__)
 
