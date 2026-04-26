@@ -2439,10 +2439,90 @@ def _auto_check_loop():
     """后台巡检线程：定期检查额度，多个账号低于阈值时自动轮转"""
     from autoteam.accounts import STATUS_ACTIVE, STATUS_AUTH_PENDING, load_accounts
     from autoteam.codex_auth import check_codex_quota
-    from autoteam.manager import _auth_repair_skip_reason, _count_pool_active_accounts, _pool_active_target
+    from autoteam.manager import (
+        _auth_repair_skip_reason,
+        _count_pool_active_accounts,
+        _pool_active_target,
+        sync_account_states,
+    )
 
     target_seats = 5
     pool_active_target = _pool_active_target(target_seats)
+
+    def _collect_auto_check_state(accounts, cfg):
+        account_by_email = {
+            (a.get("email") or "").strip().lower(): a for a in accounts if (a.get("email") or "").strip()
+        }
+        local_active_count = _count_pool_active_accounts(accounts, require_auth=True)
+        auth_pending_accounts = [
+            a for a in accounts if a["status"] == STATUS_AUTH_PENDING and not _is_main_account_email(a.get("email"))
+        ]
+        missing_auth_accounts = [
+            a
+            for a in accounts
+            if a["status"] == STATUS_ACTIVE
+            and not _is_main_account_email(a.get("email"))
+            and not (a.get("auth_file") and Path(a["auth_file"]).exists())
+        ]
+        active = [
+            a
+            for a in accounts
+            if a["status"] == STATUS_ACTIVE
+            and not _is_main_account_email(a.get("email"))
+            and a.get("auth_file")
+            and Path(a["auth_file"]).exists()
+        ]
+
+        low_accounts = []
+        auth_problem_accounts = []
+        for acc in active:
+            try:
+                auth_data = json.loads(read_text(Path(acc["auth_file"])))
+                access_token = auth_data.get("access_token")
+                if not access_token:
+                    continue
+                status, info = check_codex_quota(access_token)
+                if status == "ok" and isinstance(info, dict):
+                    remaining = 100 - info.get("primary_pct", 0)
+                    if remaining < cfg["threshold"]:
+                        low_accounts.append((acc["email"], remaining, status, info))
+                elif status == "exhausted":
+                    low_accounts.append((acc["email"], 0, status, info))
+                elif status == "auth_error":
+                    auth_problem_accounts.append(acc["email"])
+            except Exception:
+                pass
+
+        repair_candidates = list(auth_problem_accounts)
+        if auth_pending_accounts:
+            repair_candidates.extend(a["email"] for a in auth_pending_accounts)
+        if missing_auth_accounts:
+            repair_candidates.extend(a["email"] for a in missing_auth_accounts)
+        repair_candidates = list(dict.fromkeys(repair_candidates))
+
+        actionable_repair_candidates = []
+        throttled_repair_candidates = []
+        for candidate_email in repair_candidates:
+            acc = account_by_email.get(candidate_email.lower())
+            skip_reason = _auth_repair_skip_reason(acc, force=False)
+            if skip_reason:
+                throttled_repair_candidates.append((candidate_email, skip_reason))
+            else:
+                actionable_repair_candidates.append(candidate_email)
+
+        return {
+            "accounts": accounts,
+            "account_by_email": account_by_email,
+            "local_active_count": local_active_count,
+            "auth_pending_accounts": auth_pending_accounts,
+            "missing_auth_accounts": missing_auth_accounts,
+            "active": active,
+            "low_accounts": low_accounts,
+            "auth_problem_accounts": auth_problem_accounts,
+            "repair_candidates": repair_candidates,
+            "actionable_repair_candidates": actionable_repair_candidates,
+            "throttled_repair_candidates": throttled_repair_candidates,
+        }
 
     while not _auto_check_stop.is_set():
         try:
@@ -2468,48 +2548,10 @@ def _auto_check_loop():
         try:
             cfg = _auto_check_config  # 重新读取
             accounts = load_accounts()
-            account_by_email = {
-                (a.get("email") or "").strip().lower(): a for a in accounts if (a.get("email") or "").strip()
-            }
-            local_active_count = _count_pool_active_accounts(accounts, require_auth=True)
-            auth_pending_accounts = [
-                a for a in accounts if a["status"] == STATUS_AUTH_PENDING and not _is_main_account_email(a.get("email"))
-            ]
-            missing_auth_accounts = [
-                a
-                for a in accounts
-                if a["status"] == STATUS_ACTIVE
-                and not _is_main_account_email(a.get("email"))
-                and not (a.get("auth_file") and Path(a["auth_file"]).exists())
-            ]
-            active = [
-                a
-                for a in accounts
-                if a["status"] == STATUS_ACTIVE
-                and not _is_main_account_email(a.get("email"))
-                and a.get("auth_file")
-                and Path(a["auth_file"]).exists()
-            ]
-
-            low_accounts = []
-            auth_problem_accounts = []
-            for acc in active:
-                try:
-                    auth_data = json.loads(read_text(Path(acc["auth_file"])))
-                    access_token = auth_data.get("access_token")
-                    if not access_token:
-                        continue
-                    status, info = check_codex_quota(access_token)
-                    if status == "ok" and isinstance(info, dict):
-                        remaining = 100 - info.get("primary_pct", 0)
-                        if remaining < cfg["threshold"]:
-                            low_accounts.append((acc["email"], remaining, status, info))
-                    elif status == "exhausted":
-                        low_accounts.append((acc["email"], 0, status, info))
-                    elif status == "auth_error":
-                        auth_problem_accounts.append(acc["email"])
-                except Exception:
-                    pass
+            state = _collect_auto_check_state(accounts, cfg)
+            local_active_count = state["local_active_count"]
+            low_accounts = state["low_accounts"]
+            auth_problem_accounts = state["auth_problem_accounts"]
 
             if low_accounts:
                 logger.info(
@@ -2530,22 +2572,8 @@ def _auto_check_loop():
             trigger_rotate = len(low_accounts) >= cfg["min_low"]
             trigger_cleanup = False
             trigger_auth_repair = False
-            repair_candidates = list(auth_problem_accounts)
-
-            if auth_pending_accounts:
-                repair_candidates.extend(a["email"] for a in auth_pending_accounts)
-            if missing_auth_accounts:
-                repair_candidates.extend(a["email"] for a in missing_auth_accounts)
-            repair_candidates = list(dict.fromkeys(repair_candidates))
-            actionable_repair_candidates = []
-            throttled_repair_candidates = []
-            for candidate_email in repair_candidates:
-                acc = account_by_email.get(candidate_email.lower())
-                skip_reason = _auth_repair_skip_reason(acc, force=False)
-                if skip_reason:
-                    throttled_repair_candidates.append((candidate_email, skip_reason))
-                else:
-                    actionable_repair_candidates.append(candidate_email)
+            actionable_repair_candidates = state["actionable_repair_candidates"]
+            throttled_repair_candidates = state["throttled_repair_candidates"]
 
             if not trigger_rotate:
                 actual_team_count = _auto_check_team_member_count()
@@ -2559,6 +2587,37 @@ def _auto_check_loop():
                     trigger_rotate = team_shortage > 0
                     if not trigger_rotate and actual_team_count >= target_seats and actionable_repair_candidates:
                         trigger_auth_repair = True
+
+                if (
+                    not trigger_rotate
+                    and not trigger_cleanup
+                    and not trigger_auth_repair
+                    and actual_team_count >= target_seats
+                    and local_active_count < pool_active_target
+                    and not throttled_repair_candidates
+                ):
+                    logger.info(
+                        "[巡检] Team 实际成员数已满足（%d/%d），但本地可用 active 仅 %d/%d，先同步本地 Team 状态后重试判断...",
+                        actual_team_count,
+                        target_seats,
+                        local_active_count,
+                        pool_active_target,
+                    )
+                    try:
+                        sync_account_states()
+                    except Exception as exc:
+                        logger.warning("[巡检] 同步本地 Team 状态失败，继续使用当前本地状态: %s", exc)
+                    else:
+                        accounts = load_accounts()
+                        state = _collect_auto_check_state(accounts, cfg)
+                        local_active_count = state["local_active_count"]
+                        low_accounts = state["low_accounts"]
+                        actionable_repair_candidates = state["actionable_repair_candidates"]
+                        throttled_repair_candidates = state["throttled_repair_candidates"]
+                        seat_shortage = max(0, target_seats - 1 - local_active_count)
+                        trigger_rotate = len(low_accounts) >= cfg["min_low"]
+                        if not trigger_rotate and actionable_repair_candidates:
+                            trigger_auth_repair = True
 
             if trigger_rotate or trigger_cleanup or trigger_auth_repair:
                 # 检查是否有任务在跑

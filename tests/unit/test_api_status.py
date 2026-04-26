@@ -1012,8 +1012,10 @@ def test_auto_check_does_not_rotate_when_team_is_full_but_no_local_repair_candid
         "autoteam.codex_auth.check_codex_quota",
         lambda _token: ("ok", {"primary_pct": 10, "primary_resets_at": 1234567890, "weekly_pct": 1}),
     )
+    sync_calls = []
     monkeypatch.setattr(api, "_auto_check_team_member_count", lambda: 5)
     monkeypatch.setattr("autoteam.accounts.update_account", lambda *args, **kwargs: None)
+    monkeypatch.setattr("autoteam.manager.sync_account_states", lambda: sync_calls.append(True))
     monkeypatch.setattr(api, "_start_task", fake_start_task)
 
     stop_event = api._auto_check_stop
@@ -1029,7 +1031,74 @@ def test_auto_check_does_not_rotate_when_team_is_full_but_no_local_repair_candid
         api._auto_check_loop()
 
     assert started == []
+    assert sync_calls == [True]
     assert "Team 实际成员数已满足（5/5），但本地可用 active 仅 3/4，且未发现可自动修复的本地账号" in caplog.text
+
+
+def test_auto_check_resyncs_local_team_state_before_declaring_no_repair_candidate(tmp_path, monkeypatch):
+    active_a = tmp_path / "active-a.json"
+    active_b = tmp_path / "active-b.json"
+    stale = tmp_path / "stale.json"
+    active_a.write_text(json.dumps({"access_token": "token-a"}), encoding="utf-8")
+    active_b.write_text(json.dumps({"access_token": "token-b"}), encoding="utf-8")
+    stale.write_text(json.dumps({"access_token": "token-stale"}), encoding="utf-8")
+
+    started = []
+    state = {
+        "accounts": [
+            {"email": "active-a@example.com", "status": "active", "auth_file": str(active_a)},
+            {"email": "active-b@example.com", "status": "active", "auth_file": str(active_b)},
+            {"email": "stale@example.com", "status": "standby", "auth_file": str(stale)},
+        ]
+    }
+
+    def fake_start_task(command, func, params, *args, **kwargs):
+        started.append((command, params, args, kwargs))
+
+    def fake_load_accounts():
+        return [dict(item) for item in state["accounts"]]
+
+    def fake_sync_account_states():
+        state["accounts"][2]["status"] = "active"
+
+    def fake_check_quota(token):
+        if token == "token-stale":
+            return "auth_error", None
+        return "ok", {"primary_pct": 10, "primary_resets_at": 1234567890, "weekly_pct": 1}
+
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2})
+    monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
+    monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
+    monkeypatch.setattr(api, "_maybe_reload_runtime_config_from_env_file", lambda *args, **kwargs: False)
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr("autoteam.accounts.load_accounts", fake_load_accounts)
+    monkeypatch.setattr("autoteam.codex_auth.check_codex_quota", fake_check_quota)
+    monkeypatch.setattr("autoteam.manager.sync_account_states", fake_sync_account_states)
+    monkeypatch.setattr(api, "_auto_check_team_member_count", lambda: 5)
+    monkeypatch.setattr(api, "_require_pool_operation_configs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(api, "_start_task", fake_start_task)
+
+    stop_event = api._auto_check_stop
+    wait_calls = {"count": 0}
+
+    def fake_wait(_seconds):
+        wait_calls["count"] += 1
+        return wait_calls["count"] > 1
+
+    monkeypatch.setattr(stop_event, "wait", fake_wait)
+
+    api._auto_check_loop()
+
+    assert len(started) == 1
+    command, params, args, kwargs = started[0]
+    assert command == "auto-auth-repair"
+    assert params["trigger"] == "auto-check"
+    assert params["team_count"] == 5
+    assert params["pool_active"] == 3
+    assert params["pool_active_target"] == 4
+    assert params["repair_candidates"] == ["stale@example.com"]
+    assert args == ()
+    assert kwargs == {}
 
 
 def test_auto_check_logs_threshold_message_when_team_is_full_but_low_accounts_are_below_min_low(
