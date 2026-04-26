@@ -26,6 +26,7 @@ cp .env.example .env
 | `SUB2API_EMAIL` | Sub2API 管理员邮箱 | 启用 Sub2API 时必填 |
 | `SUB2API_PASSWORD` | Sub2API 管理员密码 | 启用 Sub2API 时必填 |
 | `SUB2API_GROUP` | Sub2API 分组名或分组 ID，多个用逗号分隔 | 启用 Sub2API 且希望自动加入分组时填写 |
+| `SUB2API_PROXY` | Sub2API 代理 ID 或名称 | 否；仅账号池同步新建账号时写入 `proxy_id` |
 | `SUB2API_CONCURRENCY` | Sub2API 新建账号默认并发数 | 否（默认 `10`） |
 | `SUB2API_PRIORITY` | Sub2API 新建账号默认优先级 | 否（默认 `1`） |
 | `SUB2API_RATE_MULTIPLIER` | Sub2API 新建账号默认倍率 | 否（默认 `1`） |
@@ -82,6 +83,29 @@ SUB2API_GROUP=12,Team Pool
 - 同步账号池账号时会自动带上这些分组
 - 同步主号 Codex 到 Sub2API 时也会自动带上这些分组
 - 更新时会保留账号原本手动绑定的其他分组，只替换 AutoTeam 自己管理的分组绑定
+
+## Sub2API 账号代理
+
+如果希望账号池同步到 Sub2API 后，新创建的 OpenAI OAuth 账号自动绑定 Sub2API 中已有的代理，可以设置：
+
+```dotenv
+SUB2API_PROXY=Residential Pool
+```
+
+也可以直接填写代理 ID：
+
+```dotenv
+SUB2API_PROXY=12
+```
+
+说明：
+
+- 支持 **代理名称** 或 **代理 ID**
+- 名称会通过 Sub2API 管理接口解析为账号创建请求里的 `proxy_id`
+- 只在账号池 active 账号同步到 Sub2API 且需要 **新建远端账号** 时写入
+- 更新已有远端账号时不会覆盖或清空原本的 `proxy_id`
+- 同步主号 Codex 到 Sub2API 时不使用该配置
+- 这里不是代理 URL，也不会影响 `PLAYWRIGHT_PROXY_URL` 或 AutoTeam 访问 Sub2API 管理 API 的网络路径
 
 ## Sub2API 默认账号设置
 
@@ -220,6 +244,6 @@ codex-{email}-{plan_type}-{hash}.json
 - CloudMail：登录 → 创建测试邮箱 → 删除
 - Cloudflare Temp Email：登录 → 创建测试邮箱 → 删除
 - CPA：获取认证文件列表
-- Sub2API：管理员登录 → 获取 OpenAI OAuth 账号列表 → 校验 `SUB2API_GROUP`（如已填写）
+- Sub2API：管理员登录 → 获取 OpenAI OAuth 账号列表 → 校验 `SUB2API_GROUP`（如已填写）；`SUB2API_PROXY` 名称会在同步创建账号时解析
 
 验证失败会提示具体哪个环节有问题，保存会被拒绝。

@@ -239,7 +239,7 @@
           <div class="mb-4">
             <div class="text-sm font-medium text-white">Sub2API</div>
             <div class="mt-1 text-xs leading-5 text-slate-400">
-              为已启用的 Sub2API 远端填写地址、管理员邮箱和密码。
+              为已启用的 Sub2API 远端填写地址、管理员邮箱、密码、分组和可选代理绑定。
             </div>
           </div>
           <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -506,6 +506,7 @@ const runtimeCategoryKeys = {
     'SUB2API_EMAIL',
     'SUB2API_PASSWORD',
     'SUB2API_GROUP',
+    'SUB2API_PROXY',
     'SUB2API_CONCURRENCY',
     'SUB2API_PRIORITY',
     'SUB2API_RATE_MULTIPLIER',
@@ -586,6 +587,7 @@ const sub2apiFieldHints = {
   SUB2API_EMAIL: 'ENV: SUB2API_EMAIL · login.email',
   SUB2API_PASSWORD: 'ENV: SUB2API_PASSWORD · login.password',
   SUB2API_GROUP: 'ENV: SUB2API_GROUP · group_ids',
+  SUB2API_PROXY: 'ENV: SUB2API_PROXY · account.proxy_id（ID 或名称，仅账号池新建时写入）',
   SUB2API_CONCURRENCY: 'ENV: SUB2API_CONCURRENCY · account.concurrency',
   SUB2API_PRIORITY: 'ENV: SUB2API_PRIORITY · account.priority',
   SUB2API_RATE_MULTIPLIER: 'ENV: SUB2API_RATE_MULTIPLIER · account.rate_multiplier',
@@ -624,7 +626,7 @@ const syncCpaEnabled = computed(() => String(runtimeForm.SYNC_TARGET_CPA || '').
 const syncSub2apiEnabled = computed(() => String(runtimeForm.SYNC_TARGET_SUB2API || '').toLowerCase() === 'true')
 const syncCpaFields = computed(() => syncCpaEnabled.value ? fieldsByKeys(['CPA_URL', 'CPA_KEY']) : [])
 const syncSub2apiConnectionFields = computed(() => syncSub2apiEnabled.value
-  ? fieldsByKeys(['SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP'])
+  ? fieldsByKeys(['SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP', 'SUB2API_PROXY'])
   : [])
 const syncSub2apiDefaultFields = computed(() => syncSub2apiEnabled.value
   ? fieldsByKeys([
