@@ -26,6 +26,7 @@ from autoteam.config import (
     SUB2API_PROXY,
     SUB2API_RATE_MULTIPLIER,
     SUB2API_URL,
+    SYNC_PERSONAL_TO_SUB2API,
 )
 from autoteam.textio import read_text
 
@@ -42,6 +43,7 @@ _EXTRA_SOURCE = "autoteam_source"
 _EXTRA_LAST_SYNC_AT = "autoteam_last_sync_at"
 _EXTRA_GROUP_IDS = "autoteam_sub2api_group_ids"
 _EXTRA_GROUP_NAMES = "autoteam_sub2api_group_names"
+_EXTRA_WORKSPACE_KIND = "autoteam_workspace_kind"
 
 _KIND_POOL = "pool"
 _KIND_MAIN = "main"
@@ -159,6 +161,16 @@ def _managed_auth_file(item: dict) -> str:
     return (extra.get(_EXTRA_AUTH_FILE) or "").strip()
 
 
+def _managed_identity(item: dict) -> str:
+    auth_file = _managed_auth_file(item)
+    if auth_file:
+        return auth_file
+    email = _managed_email(item)
+    if email:
+        return email
+    return f"{item.get('id')}"
+
+
 def _managed_group_ids(item: dict) -> list[int]:
     extra = item.get("extra") or {}
     values = extra.get(_EXTRA_GROUP_IDS)
@@ -273,9 +285,7 @@ def _dedupe_managed_accounts(token: str, items: list[dict], *, kind: str) -> tup
         if not _is_managed_account(item, kind=kind):
             continue
 
-        key = _managed_email(item)
-        if not key:
-            key = f"{kind}:{item.get('id')}"
+        key = _managed_identity(item) or f"{kind}:{item.get('id')}"
 
         previous = deduped.get(key)
         if previous is None or int(item.get("id") or 0) > int(previous.get("id") or 0):
@@ -564,12 +574,20 @@ def _build_credentials(auth_data: dict) -> dict:
     return credentials
 
 
-def _build_extra(email: str, auth_file_name: str, *, kind: str, quota_info: dict | None = None) -> dict:
+def _build_extra(
+    email: str,
+    auth_file_name: str,
+    *,
+    kind: str,
+    quota_info: dict | None = None,
+    workspace_kind: str = "team",
+) -> dict:
     extra = {
         _EXTRA_MANAGED: True,
         _EXTRA_KIND: kind,
         _EXTRA_EMAIL: email.lower(),
         _EXTRA_AUTH_FILE: _remote_auth_file_name(auth_file_name),
+        _EXTRA_WORKSPACE_KIND: workspace_kind,
         _EXTRA_SOURCE: "autoteam",
         _EXTRA_LAST_SYNC_AT: int(time.time()),
         "email": email.lower(),
@@ -727,38 +745,50 @@ def sync_to_sub2api():
     active_targets = {}
 
     for acc in accounts:
-        if acc.get("status") != STATUS_ACTIVE or not acc.get("auth_file"):
-            continue
-        auth_path = Path(acc["auth_file"])
-        if not auth_path.exists():
-            continue
-        try:
-            auth_data = _load_auth_data(auth_path)
-        except Exception as exc:
-            logger.warning("[Sub2API] 读取 auth 文件失败，跳过 %s: %s", auth_path, exc)
-            continue
+        contexts = [("team", acc.get("status"), acc.get("auth_file"), acc.get("last_quota"))]
+        if SYNC_PERSONAL_TO_SUB2API:
+            contexts.append(
+                ("personal", acc.get("personal_status"), acc.get("personal_auth_file"), acc.get("personal_last_quota"))
+            )
 
-        email = (auth_data.get("email") or acc.get("email") or "").strip().lower()
-        if not email:
-            continue
+        for workspace_kind, status, auth_file, quota_info in contexts:
+            if status != STATUS_ACTIVE or not auth_file:
+                continue
+            auth_path = Path(auth_file)
+            if not auth_path.exists():
+                continue
+            try:
+                auth_data = _load_auth_data(auth_path)
+            except Exception as exc:
+                logger.warning("[Sub2API] 读取 auth 文件失败，跳过 %s: %s", auth_path, exc)
+                continue
 
-        active_targets[email] = {
-            "email": email,
-            "name": acc.get("email") or email,
-            "auth_path": auth_path,
-            "auth_data": auth_data,
-            "quota_info": acc.get("last_quota"),
-        }
+            email = (auth_data.get("email") or acc.get("email") or "").strip().lower()
+            if not email:
+                continue
+
+            identity = _remote_auth_file_name(auth_path.name)
+            active_targets[identity] = {
+                "identity": identity,
+                "email": email,
+                "name": (acc.get("email") or email)
+                if workspace_kind == "team"
+                else f"{acc.get('email') or email} [personal]",
+                "auth_path": auth_path,
+                "auth_data": auth_data,
+                "quota_info": quota_info,
+                "workspace_kind": workspace_kind,
+            }
 
     token = _login()
     group_ids, group_names = _resolve_group_binding(token)
     remote_accounts = _list_openai_oauth_accounts(token)
-    existing_by_email, duplicates_deleted = _dedupe_managed_accounts(token, remote_accounts, kind=_KIND_POOL)
+    existing_by_identity, duplicates_deleted = _dedupe_managed_accounts(token, remote_accounts, kind=_KIND_POOL)
 
     logger.info(
         "[Sub2API] active 账号: %d, Sub2API 管理账号: %d",
         len(active_targets),
-        len(existing_by_email),
+        len(existing_by_identity),
     )
     if group_ids:
         logger.info(
@@ -772,16 +802,17 @@ def sync_to_sub2api():
     proxy_id = None
     proxy_id_resolved = False
 
-    for email, target in active_targets.items():
+    for identity, target in active_targets.items():
         desired_credentials = _build_credentials(target["auth_data"])
         desired_extra = _build_extra(
-            email,
+            target["email"],
             target["auth_path"].name,
             kind=_KIND_POOL,
             quota_info=target.get("quota_info"),
+            workspace_kind=target.get("workspace_kind") or "team",
         )
         _attach_group_metadata(desired_extra, group_ids, group_names)
-        existing = existing_by_email.get(email)
+        existing = existing_by_identity.get(identity) or existing_by_identity.get(target["email"])
 
         if existing:
             merged_credentials = dict(existing.get("credentials") or {})
@@ -802,7 +833,7 @@ def sync_to_sub2api():
                 group_ids=_merge_group_ids(existing, group_ids),
                 account_settings=account_settings,
             )
-            logger.info("[Sub2API] 更新: %s", email)
+            logger.info("[Sub2API] 更新: %s", identity)
             updated += 1
             continue
 
@@ -817,18 +848,19 @@ def sync_to_sub2api():
             name=target["name"],
             credentials=desired_credentials,
             extra=desired_extra,
-            label=f"创建账号 {email}",
+            label=f"创建账号 {identity}",
             group_ids=group_ids,
             account_settings=_build_account_settings(),
             proxy_id=proxy_id,
         )
-        logger.info("[Sub2API] 创建: %s", email)
+        logger.info("[Sub2API] 创建: %s", identity)
         created += 1
 
-    for email, account in existing_by_email.items():
-        if email in local_emails and email not in active_targets:
+    active_target_names = {target["identity"] for target in active_targets.values()}
+    for identity, account in existing_by_identity.items():
+        if _managed_email(account) in local_emails and _managed_auth_file(account) not in active_target_names:
             _delete_account(token, account, label="删除非 active 账号")
-            logger.info("[Sub2API] 删除非 active 账号: %s", email)
+            logger.info("[Sub2API] 删除非 active 账号: %s", identity)
             deleted += 1
 
     final_accounts = _list_openai_oauth_accounts(token)

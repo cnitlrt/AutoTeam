@@ -28,13 +28,17 @@ from pathlib import Path
 
 from autoteam.account_ops import delete_managed_account, fetch_team_state
 from autoteam.accounts import (
+    PERSONAL_CONTEXT,
     STATUS_ACTIVE,
     STATUS_AUTH_PENDING,
     STATUS_EXHAUSTED,
     STATUS_PENDING,
     STATUS_STANDBY,
+    TEAM_CONTEXT,
     add_account,
+    context_updates,
     find_account,
+    get_context_value,
     get_standby_accounts,
     load_accounts,
     save_accounts,
@@ -49,6 +53,7 @@ from autoteam.codex_auth import (
     check_codex_quota,
     get_quota_exhausted_info,
     get_saved_main_auth_file,
+    infer_workspace_kind,
     login_codex_via_browser,
     quota_result_quota_info,
     quota_result_resets_at,
@@ -148,14 +153,42 @@ def _can_attempt_auth_repair(acc: dict | None, mail_domain_suffix: str = "") -> 
     return bool(mail_domain_suffix and mail_domain_suffix in email)
 
 
-def _has_auth_file(acc: dict | None) -> bool:
+def _context_update_payload(context: str, **kwargs) -> dict:
+    return kwargs if context == TEAM_CONTEXT else context_updates(context, **kwargs)
+
+
+def _get_auth_file(acc: dict | None, *, context: str = TEAM_CONTEXT) -> str:
     acc = acc or {}
-    auth_file = (acc.get("auth_file") or "").strip()
+    auth_file = str(get_context_value(acc, context, "auth_file", "") or "").strip()
+    return auth_file
+
+
+def _has_auth_file(acc: dict | None, *, context: str = TEAM_CONTEXT) -> bool:
+    acc = acc or {}
+    auth_file = _get_auth_file(acc, context=context)
     return bool(auth_file) and Path(auth_file).exists()
 
 
 def _pool_active_target(team_target: int) -> int:
     return max(0, int(team_target) - 1)
+
+
+def _personal_overflow_enabled() -> bool:
+    from autoteam.config import ENABLE_PERSONAL_OVERFLOW
+
+    return bool(ENABLE_PERSONAL_OVERFLOW)
+
+
+def _personal_sync_enabled(target: str) -> bool:
+    if target == "cpa":
+        from autoteam.config import SYNC_PERSONAL_TO_CPA
+
+        return bool(SYNC_PERSONAL_TO_CPA)
+    if target == "sub2api":
+        from autoteam.config import SYNC_PERSONAL_TO_SUB2API
+
+        return bool(SYNC_PERSONAL_TO_SUB2API)
+    return False
 
 
 def _count_pool_active_accounts(accounts: list[dict] | None = None, *, require_auth: bool = False) -> int:
@@ -184,16 +217,18 @@ def _estimate_local_team_member_count(team_target: int, accounts: list[dict] | N
     return _count_local_team_seat_accounts(accounts) + reserved_main
 
 
-def _set_auth_pending_or_standby(email: str) -> str:
-    if _is_email_in_team(email):
+def _set_auth_pending_or_standby(email: str, *, context: str = TEAM_CONTEXT) -> str:
+    if context == TEAM_CONTEXT and _is_email_in_team(email):
         update_account(email, status=STATUS_AUTH_PENDING)
         return STATUS_AUTH_PENDING
-    update_account(email, status=STATUS_STANDBY, **_auth_repair_reset_fields())
+    update_account(
+        email, **_context_update_payload(context, status=STATUS_STANDBY, **_auth_repair_reset_fields(context))
+    )
     return STATUS_STANDBY
 
 
-def _auth_repair_reset_fields() -> dict:
-    return {
+def _auth_repair_reset_fields(context: str = TEAM_CONTEXT) -> dict:
+    fields = {
         "auth_retry_count": 0,
         "auth_last_error": None,
         "auth_last_error_detail": None,
@@ -201,6 +236,7 @@ def _auth_repair_reset_fields() -> dict:
         "auth_retry_after": None,
         "auth_retry_paused": False,
     }
+    return _context_update_payload(context, **fields)
 
 
 def _auth_repair_retry_delays() -> tuple[int, int, int]:
@@ -235,48 +271,61 @@ def _auth_repair_error_label(error_type: str | None) -> str:
     return mapping.get(error_type or "", error_type or "未知错误")
 
 
-def _auth_repair_state_suffix(state: dict | None) -> str:
+def _auth_repair_state_suffix(state: dict | None, *, context: str = TEAM_CONTEXT) -> str:
     state = state or {}
-    if state.get("auth_retry_paused"):
+    if get_context_value(state, context, "auth_retry_paused"):
         return "，已暂停自动修复"
-    retry_after = state.get("auth_retry_after")
+    retry_after = get_context_value(state, context, "auth_retry_after")
     if retry_after:
         mins = max(1, int((retry_after - time.time() + 59) // 60))
         return f"，约 {mins} 分钟后重试"
     return ""
 
 
-def _auth_repair_reset(email: str):
-    update_account(email, **_auth_repair_reset_fields())
+def _auth_repair_reset(email: str, *, context: str = TEAM_CONTEXT):
+    update_account(email, **_auth_repair_reset_fields(context))
 
 
-def _auth_repair_skip_reason(acc: dict | None, *, force: bool = False, now: float | None = None) -> str | None:
+def _auth_repair_skip_reason(
+    acc: dict | None,
+    *,
+    context: str = TEAM_CONTEXT,
+    force: bool = False,
+    now: float | None = None,
+) -> str | None:
     if force or not acc:
         return None
 
-    if acc.get("auth_retry_paused"):
-        label = _auth_repair_error_label(acc.get("auth_last_error"))
+    if get_context_value(acc, context, "auth_retry_paused"):
+        label = _auth_repair_error_label(get_context_value(acc, context, "auth_last_error"))
         return f"已暂停自动修复（{label}）"
 
-    retry_after = acc.get("auth_retry_after")
+    retry_after = get_context_value(acc, context, "auth_retry_after")
     now = time.time() if now is None else now
     if retry_after and retry_after > now:
         remain_secs = max(0, int(retry_after - now))
         remain_mins = max(1, (remain_secs + 59) // 60)
-        label = _auth_repair_error_label(acc.get("auth_last_error"))
+        label = _auth_repair_error_label(get_context_value(acc, context, "auth_last_error"))
         return f"自动修复冷却中（{label}，约 {remain_mins} 分钟后重试）"
     return None
 
 
-def _record_auth_repair_failure(email: str, error_type: str | None = None, error_detail: str | None = None) -> dict:
+def _record_auth_repair_failure(
+    email: str,
+    error_type: str | None = None,
+    error_detail: str | None = None,
+    *,
+    context: str = TEAM_CONTEXT,
+) -> dict:
     now = time.time()
     acc = find_account(load_accounts(), email) or {"email": email}
     error_type = error_type or "login_failed"
     error_detail = error_detail or _auth_repair_error_label(error_type)
     retry_delays = _auth_repair_retry_delays()
+    retry_count_field = get_context_value(acc, context, "auth_retry_count", 0)
 
     if error_type in AUTH_REPAIR_HARD_FAILURE_TYPES:
-        retry_count = max(int(acc.get("auth_retry_count") or 0), len(retry_delays))
+        retry_count = max(int(retry_count_field or 0), len(retry_delays))
         state = {
             "auth_retry_count": retry_count,
             "auth_last_error": error_type,
@@ -285,10 +334,10 @@ def _record_auth_repair_failure(email: str, error_type: str | None = None, error
             "auth_retry_after": None,
             "auth_retry_paused": True,
         }
-        update_account(email, **state)
-        return state
+        update_account(email, **_context_update_payload(context, **state))
+        return _context_update_payload(context, **state)
 
-    prev_count = int(acc.get("auth_retry_count") or 0)
+    prev_count = int(retry_count_field or 0)
     next_count = min(prev_count + 1, len(retry_delays))
     delay = retry_delays[max(0, next_count - 1)]
     retry_after = now + delay
@@ -300,25 +349,41 @@ def _record_auth_repair_failure(email: str, error_type: str | None = None, error
         "auth_retry_after": retry_after,
         "auth_retry_paused": False,
     }
-    update_account(email, **state)
-    return state
+    update_account(email, **_context_update_payload(context, **state))
+    return _context_update_payload(context, **state)
 
 
-def _login_codex_with_result(email: str, password: str, *, mail_client=None, max_attempts: int = 3) -> dict:
+def _login_codex_with_result(
+    email: str,
+    password: str,
+    *,
+    mail_client=None,
+    max_attempts: int = 3,
+    workspace_kind: str = TEAM_CONTEXT,
+) -> dict:
     max_attempts = max(1, int(max_attempts))
 
     def _single_attempt() -> dict:
         try:
-            result = login_codex_via_browser(email, password, mail_client=mail_client, return_result=True)
+            result = login_codex_via_browser(
+                email,
+                password,
+                mail_client=mail_client,
+                return_result=True,
+                workspace_kind=workspace_kind,
+            )
         except TypeError:
-            bundle = login_codex_via_browser(email, password, mail_client=mail_client)
-            return {
-                "ok": bool(bundle),
-                "bundle": bundle,
-                "error_type": None if bundle else "login_failed",
-                "error_detail": None if bundle else "登录失败",
-                "retryable": False if bundle else True,
-            }
+            try:
+                result = login_codex_via_browser(email, password, mail_client=mail_client, return_result=True)
+            except TypeError:
+                bundle = login_codex_via_browser(email, password, mail_client=mail_client)
+                return {
+                    "ok": bool(bundle),
+                    "bundle": bundle,
+                    "error_type": None if bundle else "login_failed",
+                    "error_detail": None if bundle else "登录失败",
+                    "retryable": False if bundle else True,
+                }
         except Exception as exc:
             return {
                 "ok": False,
@@ -368,6 +433,176 @@ def _login_codex_with_result(email: str, password: str, *, mail_client=None, max
         "retryable": True,
         "attempts": max_attempts,
     }
+
+
+def _is_team_bundle(bundle: dict | None) -> bool:
+    return (bundle or {}).get("plan_type") == "team"
+
+
+def _persist_context_auth(
+    email: str,
+    bundle: dict,
+    *,
+    context: str,
+    status: str | None = None,
+    mark_active: bool = False,
+) -> str:
+    try:
+        auth_file = save_auth_file(bundle, workspace_kind=context)
+    except TypeError:
+        auth_file = save_auth_file(bundle)
+    field_payload = {"auth_file": auth_file}
+    if context != TEAM_CONTEXT and bundle.get("account_id"):
+        field_payload["account_id"] = bundle.get("account_id")
+    if context != TEAM_CONTEXT and bundle.get("plan_type"):
+        field_payload["plan_type"] = bundle.get("plan_type")
+    payload = _context_update_payload(context, **field_payload)
+    if status is not None:
+        payload.update(_context_update_payload(context, status=status))
+    if mark_active:
+        payload.update(_context_update_payload(context, last_active_at=time.time()))
+    update_account(email, **payload)
+    return auth_file
+
+
+def _team_quota_resets_at(acc: dict | None) -> int:
+    acc = acc or {}
+    resets_at = acc.get("quota_resets_at")
+    if resets_at:
+        try:
+            return int(resets_at)
+        except Exception:
+            pass
+    quota = acc.get("last_quota") or {}
+    try:
+        return int(quota.get("primary_resets_at") or 0)
+    except Exception:
+        return 0
+
+
+def _team_quota_still_pending(acc: dict | None, *, now: float | None = None) -> bool:
+    current_ts = time.time() if now is None else now
+    resets_at = _team_quota_resets_at(acc)
+    return bool(resets_at and current_ts < resets_at)
+
+
+def _personal_quota_update_payload(status_str: str, info, *, now: float | None = None) -> dict:
+    now_ts = time.time() if now is None else now
+    if status_str == "ok" and isinstance(info, dict):
+        return _context_update_payload(
+            PERSONAL_CONTEXT,
+            last_quota=info,
+            quota_window=None,
+            quota_exhausted_at=None,
+            quota_resets_at=info.get("primary_resets_at") or None,
+        )
+
+    quota_info = quota_result_quota_info(info) or {}
+    resets_at = quota_result_resets_at(info) or int(now_ts + 18000)
+    payload = _context_update_payload(
+        PERSONAL_CONTEXT,
+        last_quota=quota_info or None,
+        quota_window=info.get("window") if isinstance(info, dict) else None,
+        quota_exhausted_at=now_ts,
+        quota_resets_at=resets_at,
+    )
+    return payload
+
+
+def _activate_personal_overflow(acc: dict, *, mail_client) -> bool:
+    if not _personal_overflow_enabled():
+        return False
+
+    email = acc["email"]
+    password = acc.get("password", "")
+    logger.info("[Personal] 开始切换到 Personal/free: %s", email)
+    login_result = _login_codex_with_result(
+        email,
+        password,
+        mail_client=mail_client,
+        workspace_kind=PERSONAL_CONTEXT,
+    )
+    bundle = login_result.get("bundle")
+    if not login_result.get("ok") or not bundle:
+        state = _record_auth_repair_failure(
+            email,
+            login_result.get("error_type"),
+            login_result.get("error_detail"),
+            context=PERSONAL_CONTEXT,
+        )
+        update_account(email, personal_status=STATUS_AUTH_PENDING)
+        logger.warning(
+            "[Personal] 切换失败: %s（%s%s）",
+            email,
+            _auth_repair_error_label(get_context_value(state, PERSONAL_CONTEXT, "auth_last_error")),
+            _auth_repair_state_suffix(state, context=PERSONAL_CONTEXT),
+        )
+        return False
+
+    if _is_team_bundle(bundle):
+        state = _record_auth_repair_failure(
+            email,
+            "non_team_plan",
+            "Personal 切换时仍进入了 Team workspace",
+            context=PERSONAL_CONTEXT,
+        )
+        update_account(email, personal_status=STATUS_AUTH_PENDING)
+        logger.warning(
+            "[Personal] 切换失败，仍进入 Team workspace: %s%s",
+            email,
+            _auth_repair_state_suffix(state, context=PERSONAL_CONTEXT),
+        )
+        return False
+
+    _persist_context_auth(email, bundle, context=PERSONAL_CONTEXT, status=STATUS_ACTIVE, mark_active=True)
+    _auth_repair_reset(email, context=PERSONAL_CONTEXT)
+    status_str, info = _check_and_refresh(find_account(load_accounts(), email), context=PERSONAL_CONTEXT)
+    if status_str == "auth_error":
+        state = _record_auth_repair_failure(
+            email,
+            "auth_code_missing",
+            "Personal 登录成功但后续额度查询失败",
+            context=PERSONAL_CONTEXT,
+        )
+        update_account(email, personal_status=STATUS_AUTH_PENDING)
+        logger.warning(
+            "[Personal] 已保存认证，但额度查询失败: %s%s",
+            email,
+            _auth_repair_state_suffix(state, context=PERSONAL_CONTEXT),
+        )
+        return False
+
+    if status_str in {"ok", "exhausted"}:
+        update_account(email, **_personal_quota_update_payload(status_str, info))
+        if status_str == "exhausted":
+            update_account(email, personal_status=STATUS_EXHAUSTED)
+            logger.warning("[Personal] Personal/free 额度也已用完: %s", email)
+            return False
+
+    logger.info("[Personal] 已切换到 Personal/free: %s", email)
+    return True
+
+
+def _try_restore_team_from_personal(acc: dict, *, mail_client) -> bool:
+    email = acc["email"]
+    password = acc.get("password", "")
+    logger.info("[Personal] Team 额度预计已恢复，尝试切回 Team: %s", email)
+    login_result = _login_codex_with_result(email, password, mail_client=mail_client, workspace_kind=TEAM_CONTEXT)
+    bundle = login_result.get("bundle")
+    if not login_result.get("ok") or not bundle or not _is_team_bundle(bundle):
+        state = _record_auth_repair_failure(
+            email,
+            (login_result.get("error_type") or "non_team_plan") if bundle else login_result.get("error_type"),
+            login_result.get("error_detail") or "切回 Team 失败",
+        )
+        logger.warning("[Personal] 切回 Team 失败: %s%s", email, _auth_repair_state_suffix(state))
+        return False
+
+    _persist_context_auth(email, bundle, context=TEAM_CONTEXT, status=STATUS_ACTIVE, mark_active=True)
+    _auth_repair_reset(email)
+    update_account(email, personal_status=STATUS_STANDBY)
+    logger.info("[Personal] 已切回 Team: %s", email)
+    return True
 
 
 def sync_account_states(chatgpt_api=None):
@@ -465,28 +700,45 @@ def sync_account_states(chatgpt_api=None):
                 email = auth_data.get("email", "").lower()
                 if not email or email in local_email_set or _is_main_account_email(email):
                     continue
+                workspace_kind = infer_workspace_kind(
+                    {"workspace_kind": auth_data.get("workspace_kind"), "plan_type": auth_data.get("plan_type")},
+                    fallback_name=auth_file.name,
+                )
                 # 判断是否在 Team 中
                 in_team = email in team_emails
                 status = STATUS_ACTIVE if in_team else STATUS_STANDBY
-                accounts.append(
-                    {
-                        "email": email,
-                        "password": "",
-                        "mail_provider": current_mail_provider,
-                        "mail_account_id": None,
-                        "cloudmail_account_id": None,
-                        "status": status,
-                        "auth_file": str(auth_file),
-                        "quota_exhausted_at": None,
-                        "quota_resets_at": None,
-                        "created_at": time.time(),
-                        "last_active_at": None,
-                        **_auth_repair_reset_fields(),
-                    }
-                )
+                record = {
+                    "email": email,
+                    "password": "",
+                    "mail_provider": current_mail_provider,
+                    "mail_account_id": None,
+                    "cloudmail_account_id": None,
+                    "status": status,
+                    "quota_exhausted_at": None,
+                    "quota_resets_at": None,
+                    "created_at": time.time(),
+                    "last_active_at": None,
+                    **_auth_repair_reset_fields(),
+                }
+                if workspace_kind == PERSONAL_CONTEXT:
+                    record.update(
+                        personal_status=STATUS_ACTIVE if not in_team else STATUS_STANDBY,
+                        personal_auth_file=str(auth_file),
+                        personal_account_id=auth_data.get("account_id") or None,
+                        personal_plan_type=auth_data.get("plan_type") or None,
+                        **_auth_repair_reset_fields(PERSONAL_CONTEXT),
+                    )
+                    record["auth_file"] = None
+                else:
+                    record.update(
+                        auth_file=str(auth_file),
+                        account_id=auth_data.get("account_id") or None,
+                        plan_type=auth_data.get("plan_type") or None,
+                    )
+                accounts.append(record)
                 local_email_set.add(email)
                 changed = True
-                logger.info("[同步] 从 auths 目录恢复账号: %s（%s）", email, status)
+                logger.info("[同步] 从 auths 目录恢复账号: %s（%s/%s）", email, workspace_kind, status)
             except Exception:
                 continue
 
@@ -620,12 +872,12 @@ def cmd_status():
     _print_status_table(accounts, quota_cache)
 
 
-def _check_and_refresh(acc):
+def _check_and_refresh(acc, *, context: str = TEAM_CONTEXT):
     """检查单个账号额度，401 时自动刷新 token。返回 (status_str, info)
     info: exhausted 时为 exhausted_info，ok 时为 quota_info dict
     """
     email = acc["email"]
-    auth_file = acc.get("auth_file")
+    auth_file = _get_auth_file(acc, context=context)
 
     if not auth_file or not Path(auth_file).exists():
         return "no_auth", None
@@ -633,11 +885,12 @@ def _check_and_refresh(acc):
     auth_data = json.loads(read_text(Path(auth_file)))
     access_token = auth_data.get("access_token")
     rt = auth_data.get("refresh_token")
+    account_id = auth_data.get("account_id") or get_context_value(acc, context, "account_id")
 
     if not access_token:
         return "no_auth", None
 
-    status, info = check_codex_quota(access_token)
+    status, info = check_codex_quota(access_token, account_id=account_id)
 
     # token 过期，尝试刷新
     if status == "auth_error" and rt:
@@ -649,7 +902,7 @@ def _check_and_refresh(acc):
             auth_data["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             write_text(Path(auth_file), json.dumps(auth_data, indent=2))
             logger.info("[%s] token 已刷新，重新检查额度...", email)
-            status, info = check_codex_quota(new_tokens["access_token"])
+            status, info = check_codex_quota(new_tokens["access_token"], account_id=account_id)
         else:
             logger.error("[%s] token 刷新失败", email)
 
@@ -722,6 +975,28 @@ def cmd_check(force_auth_repair=False):
             logger.info("[检查] 已删除 %d 个失败 pending 账号", deleted_pending)
             sync_to_cpa()
 
+        accounts = load_accounts()
+
+    personal_restore_candidates = [
+        a
+        for a in accounts
+        if not _is_main_account_email(a.get("email"))
+        and a.get("status") == STATUS_STANDBY
+        and a.get("personal_status") == STATUS_ACTIVE
+        and _team_quota_resets_at(a)
+        and not _team_quota_still_pending(a)
+    ]
+    if personal_restore_candidates:
+        logger.info("[检查] 发现 %d 个 Personal/free 账号可尝试切回 Team...", len(personal_restore_candidates))
+        mail_clients = {}
+        for acc in personal_restore_candidates:
+            provider = get_account_mail_provider(acc)
+            mail_client = mail_clients.get(provider)
+            if mail_client is None:
+                mail_client = _get_account_mail_client(acc)
+                mail_client.login()
+                mail_clients[provider] = mail_client
+            _try_restore_team_from_personal(acc, mail_client=mail_client)
         accounts = load_accounts()
 
     all_active = [a for a in accounts if a["status"] == STATUS_ACTIVE and not _is_main_account_email(a.get("email"))]
@@ -918,8 +1193,18 @@ def cmd_check(force_auth_repair=False):
             login_result = _login_codex_with_result(email, password, mail_client=mail_client)
             bundle = login_result.get("bundle")
             if login_result.get("ok") and bundle:
-                auth_file = save_auth_file(bundle)
-                update_account(email, auth_file=auth_file)
+                if not _is_team_bundle(bundle):
+                    final_status = _set_auth_pending_or_standby(email)
+                    state = _record_auth_repair_failure(
+                        email,
+                        "non_team_plan",
+                        f"重新登录后进入了 {bundle.get('plan_type') or 'unknown'} 而非 team",
+                    )
+                    extra = _auth_repair_state_suffix(state)
+                    logger.warning("[%s] 重新登录未进入 Team workspace，标记为 %s%s", email, final_status, extra)
+                    continue
+
+                _persist_context_auth(email, bundle, context=TEAM_CONTEXT)
                 _auth_repair_reset(email)
                 logger.info("[%s] token 已更新", email)
                 # 重新检查额度
@@ -1077,9 +1362,8 @@ def _complete_registration(email, password, invite_link, mail_client):
     # Codex 登录
     login_result = _login_codex_with_result(email, password, mail_client=mail_client)
     bundle = login_result.get("bundle")
-    if login_result.get("ok") and bundle:
-        auth_file = save_auth_file(bundle)
-        update_account(email, status=STATUS_ACTIVE, auth_file=auth_file, last_active_at=time.time())
+    if login_result.get("ok") and bundle and _is_team_bundle(bundle):
+        _persist_context_auth(email, bundle, context=TEAM_CONTEXT, status=STATUS_ACTIVE, mark_active=True)
         _auth_repair_reset(email)
         logger.info("[注册] 账号就绪: %s", email)
         return email
@@ -1883,9 +2167,8 @@ def create_account_direct(mail_client):
     # Step 4: Codex 登录
     login_result = _login_codex_with_result(email, password, mail_client=mail_client)
     bundle = login_result.get("bundle")
-    if login_result.get("ok") and bundle:
-        auth_file = save_auth_file(bundle)
-        update_account(email, status=STATUS_ACTIVE, auth_file=auth_file, last_active_at=time.time())
+    if login_result.get("ok") and bundle and _is_team_bundle(bundle):
+        _persist_context_auth(email, bundle, context=TEAM_CONTEXT, status=STATUS_ACTIVE, mark_active=True)
         _auth_repair_reset(email)
         logger.info("[直接注册] 账号就绪: %s", email)
         return email
@@ -1959,8 +2242,7 @@ def reinvite_account(chatgpt_api, mail_client, acc):
         logger.warning("[轮转] 旧账号保持状态为 %s: %s", final_status, email)
         return False
 
-    auth_file = save_auth_file(bundle)
-    update_account(email, status=STATUS_ACTIVE, last_active_at=time.time(), auth_file=auth_file)
+    _persist_context_auth(email, bundle, context=TEAM_CONTEXT, status=STATUS_ACTIVE, mark_active=True)
     _auth_repair_reset(email)
     logger.info("[轮转] 旧账号已恢复: %s", email)
     return True
@@ -2058,6 +2340,11 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
                 remove_status = remove_from_team(chatgpt, email, return_status=True)
                 if remove_status in ("removed", "already_absent"):
                     update_account(email, status=STATUS_STANDBY)
+                    if _personal_overflow_enabled() and _team_quota_still_pending(acc):
+                        try:
+                            _activate_personal_overflow(acc, mail_client=ensure_account_mail(acc))
+                        except Exception as exc:
+                            logger.warning("[Personal] 切换 %s 到 Personal/free 失败: %s", email, exc)
                     if remove_status == "removed":
                         removed_now += 1
                         logger.info("[3/5] %s → standby（已从 Team 移出）", email)

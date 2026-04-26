@@ -18,6 +18,80 @@ STATUS_STANDBY = "standby"  # 已移出 team，等待额度恢复
 STATUS_PENDING = "pending"  # 已邀请，等待注册完成
 STATUS_AUTH_PENDING = "auth_pending"  # 已在 team 中，但 Codex 认证未就绪
 
+TEAM_CONTEXT = "team"
+PERSONAL_CONTEXT = "personal"
+ACCOUNT_CONTEXTS = (TEAM_CONTEXT, PERSONAL_CONTEXT)
+
+
+def context_field(context: str, field: str) -> str:
+    if context == TEAM_CONTEXT:
+        return field
+    if context == PERSONAL_CONTEXT:
+        return f"personal_{field}"
+    raise ValueError(f"未知账号上下文: {context}")
+
+
+def context_updates(context: str, **kwargs) -> dict:
+    return {context_field(context, key): value for key, value in kwargs.items()}
+
+
+def get_context_value(account: dict | None, context: str, field: str, default=None):
+    account = account or {}
+    return account.get(context_field(context, field), default)
+
+
+def setdefault_context_fields(account: dict):
+    defaults = {
+        "auth_file": None,
+        "last_quota": None,
+        "quota_window": None,
+        "quota_exhausted_at": None,
+        "quota_resets_at": None,
+        "last_active_at": None,
+        "account_id": None,
+        "plan_type": None,
+        "auth_retry_count": 0,
+        "auth_last_error": None,
+        "auth_last_error_detail": None,
+        "auth_last_failed_at": None,
+        "auth_retry_after": None,
+        "auth_retry_paused": False,
+    }
+
+    changed = False
+    if "last_quota" not in account:
+        account["last_quota"] = None
+        changed = True
+    if "quota_window" not in account:
+        account["quota_window"] = None
+        changed = True
+    if "account_id" not in account:
+        account["account_id"] = None
+        changed = True
+    if "plan_type" not in account:
+        account["plan_type"] = None
+        changed = True
+
+    for key, value in defaults.items():
+        personal_key = context_field(PERSONAL_CONTEXT, key)
+        if personal_key not in account:
+            account[personal_key] = value
+            changed = True
+
+    if context_field(PERSONAL_CONTEXT, "status") not in account:
+        account[context_field(PERSONAL_CONTEXT, "status")] = None
+        changed = True
+
+    return changed
+
+
+def ensure_account_defaults(accounts: list[dict]) -> bool:
+    changed = False
+    for acc in accounts:
+        if setdefault_context_fields(acc):
+            changed = True
+    return changed
+
 
 def _normalized_email(value):
     return (value or "").strip().lower()
@@ -32,12 +106,15 @@ def load_accounts():
     if ACCOUNTS_FILE.exists():
         text = read_text(ACCOUNTS_FILE).strip()
         if text:
-            return json.loads(text)
+            accounts = json.loads(text)
+            ensure_account_defaults(accounts)
+            return accounts
     return []
 
 
 def save_accounts(accounts):
     """保存账号列表"""
+    ensure_account_defaults(accounts)
     write_text(ACCOUNTS_FILE, json.dumps(accounts, indent=2, ensure_ascii=False))
 
 
@@ -75,8 +152,12 @@ def add_account(email, password, cloudmail_account_id=None, *, mail_provider=Non
             **mail_fields,
             "status": STATUS_PENDING,
             "auth_file": None,  # CPA 认证文件路径
+            "last_quota": None,
+            "quota_window": None,
             "quota_exhausted_at": None,  # 额度用完的时间
             "quota_resets_at": None,  # 额度恢复时间
+            "account_id": None,
+            "plan_type": None,
             "created_at": time.time(),
             "last_active_at": None,
             "auth_retry_count": 0,
@@ -85,6 +166,21 @@ def add_account(email, password, cloudmail_account_id=None, *, mail_provider=Non
             "auth_last_failed_at": None,
             "auth_retry_after": None,
             "auth_retry_paused": False,
+            "personal_status": None,
+            "personal_auth_file": None,
+            "personal_last_quota": None,
+            "personal_quota_window": None,
+            "personal_quota_exhausted_at": None,
+            "personal_quota_resets_at": None,
+            "personal_last_active_at": None,
+            "personal_account_id": None,
+            "personal_plan_type": None,
+            "personal_auth_retry_count": 0,
+            "personal_auth_last_error": None,
+            "personal_auth_last_error_detail": None,
+            "personal_auth_last_failed_at": None,
+            "personal_auth_retry_after": None,
+            "personal_auth_retry_paused": False,
         }
     )
     save_accounts(accounts)

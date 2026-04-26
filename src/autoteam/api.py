@@ -161,6 +161,9 @@ _ALL_RUNTIME_ENV_KEYS = [
     "AUTO_CHECK_INTERVAL",
     "AUTO_CHECK_THRESHOLD",
     "AUTO_CHECK_MIN_LOW",
+    "ENABLE_PERSONAL_OVERFLOW",
+    "SYNC_PERSONAL_TO_CPA",
+    "SYNC_PERSONAL_TO_SUB2API",
     "PLAYWRIGHT_PROXY_URL",
     "PLAYWRIGHT_PROXY_SERVER",
     "PLAYWRIGHT_PROXY_USERNAME",
@@ -1887,9 +1890,10 @@ def post_account_login(params: LoginAccountParams):
     _require_sync_target_configs("登录账号")
 
     def _run():
-        from autoteam.accounts import STATUS_ACTIVE, update_account
+        from autoteam.accounts import PERSONAL_CONTEXT, STATUS_ACTIVE, TEAM_CONTEXT, context_updates, update_account
         from autoteam.codex_auth import (
             check_codex_quota,
+            infer_workspace_kind,
             login_codex_via_browser,
             quota_result_quota_info,
             quota_result_resets_at,
@@ -1901,15 +1905,34 @@ def post_account_login(params: LoginAccountParams):
         mail_client.login()
         bundle = login_codex_via_browser(email, acc.get("password", ""), mail_client=mail_client)
         if bundle:
-            auth_file = save_auth_file(bundle)
-            update_account(email, auth_file=auth_file)
+            workspace_kind = infer_workspace_kind(bundle)
+            auth_file = save_auth_file(bundle, workspace_kind=workspace_kind)
+            if workspace_kind == TEAM_CONTEXT:
+                update_account(
+                    email,
+                    auth_file=auth_file,
+                    account_id=bundle.get("account_id") or None,
+                    plan_type=bundle.get("plan_type") or None,
+                )
+            else:
+                update_account(
+                    email,
+                    **context_updates(
+                        PERSONAL_CONTEXT,
+                        auth_file=auth_file,
+                        account_id=bundle.get("account_id") or None,
+                        plan_type=bundle.get("plan_type") or None,
+                        status=STATUS_ACTIVE,
+                        last_active_at=time.time(),
+                    ),
+                )
             # 登录成功且是 team plan，自动标记为 active
             if bundle.get("plan_type") == "team":
                 update_account(email, status=STATUS_ACTIVE, last_active_at=time.time())
                 # 查一下额度并保存快照
                 token = bundle.get("access_token")
                 if token:
-                    st, info = check_codex_quota(token)
+                    st, info = check_codex_quota(token, account_id=bundle.get("account_id"))
                     if st == "ok" and isinstance(info, dict):
                         update_account(email, last_quota=info)
                     elif st == "exhausted":
@@ -1981,10 +2004,18 @@ def get_status():
         "pending": sum(1 for a in sanitized_accounts if a["status"] == STATUS_PENDING),
         "total": len(sanitized_accounts),
     }
+    personal_summary = {
+        "active": sum(1 for a in sanitized_accounts if a.get("personal_status") == STATUS_ACTIVE),
+        "auth_pending": sum(1 for a in sanitized_accounts if a.get("personal_status") == STATUS_AUTH_PENDING),
+        "standby": sum(1 for a in sanitized_accounts if a.get("personal_status") == STATUS_STANDBY),
+        "exhausted": sum(1 for a in sanitized_accounts if a.get("personal_status") == STATUS_EXHAUSTED),
+        "total": sum(1 for a in sanitized_accounts if a.get("personal_status")),
+    }
 
     return {
         "accounts": sanitized_accounts,
         "summary": summary,
+        "personal_summary": personal_summary,
         "quota_cache": quota_cache,
     }
 

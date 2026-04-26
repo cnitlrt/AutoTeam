@@ -34,6 +34,8 @@ CODEX_AUTH_URL = "https://auth.openai.com/oauth/authorize"
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_CALLBACK_PORT = 1455
 CODEX_REDIRECT_URI = f"http://localhost:{CODEX_CALLBACK_PORT}/auth/callback"
+WORKSPACE_KIND_TEAM = "team"
+WORKSPACE_KIND_PERSONAL = "personal"
 
 
 def _generate_pkce():
@@ -55,6 +57,33 @@ def _parse_jwt_payload(token):
         return json.loads(base64.urlsafe_b64decode(payload))
     except Exception:
         return {}
+
+
+def normalize_workspace_kind(value: str | None) -> str:
+    return (
+        WORKSPACE_KIND_PERSONAL if str(value or "").strip().lower() == WORKSPACE_KIND_PERSONAL else WORKSPACE_KIND_TEAM
+    )
+
+
+def infer_workspace_kind(bundle: dict | None = None, *, fallback_name: str = "") -> str:
+    bundle = bundle or {}
+    explicit = str(bundle.get("workspace_kind") or "").strip().lower()
+    if explicit in {WORKSPACE_KIND_TEAM, WORKSPACE_KIND_PERSONAL}:
+        return explicit
+
+    plan_type = str(bundle.get("plan_type") or "").strip().lower()
+    if plan_type == "team":
+        return WORKSPACE_KIND_TEAM
+
+    fallback_name = str(fallback_name or "").strip().lower()
+    if "-personal-" in fallback_name:
+        return WORKSPACE_KIND_PERSONAL
+    if "-team-" in fallback_name:
+        return WORKSPACE_KIND_TEAM
+
+    if plan_type in {"free", "plus", "pro"}:
+        return WORKSPACE_KIND_PERSONAL
+    return WORKSPACE_KIND_TEAM
 
 
 def _screenshot(page, name):
@@ -104,7 +133,7 @@ def _build_auth_url(code_challenge, state):
     return f"{CODEX_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
 
-def _exchange_auth_code(auth_code, code_verifier, fallback_email=None):
+def _exchange_auth_code(auth_code, code_verifier, fallback_email=None, workspace_kind=None):
     logger.info("[Codex] 获取到 auth code，交换 token...")
 
     import requests
@@ -139,6 +168,9 @@ def _exchange_auth_code(auth_code, code_verifier, fallback_email=None):
         "plan_type": auth_claims.get("chatgpt_plan_type", "unknown"),
         "expired": time.time() + token_data.get("expires_in", 3600),
     }
+    bundle["workspace_kind"] = (
+        WORKSPACE_KIND_TEAM if bundle["plan_type"] == "team" else normalize_workspace_kind(workspace_kind)
+    )
 
     logger.info("[Codex] 登录成功: %s (plan: %s)", bundle["email"], bundle["plan_type"])
     return bundle
@@ -154,8 +186,11 @@ def _write_auth_file(filepath, bundle):
         "id_token": bundle.get("id_token", ""),
         "access_token": bundle.get("access_token", ""),
         "refresh_token": bundle.get("refresh_token", ""),
+        "client_id": CODEX_CLIENT_ID,
         "account_id": bundle.get("account_id", ""),
         "email": bundle.get("email", ""),
+        "plan_type": bundle.get("plan_type", ""),
+        "workspace_kind": infer_workspace_kind(bundle),
         "expired": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(bundle.get("expired", 0))),
         "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -232,6 +267,46 @@ _OTP_INVALID_HINTS = (
     "验证码已过期",
 )
 
+_WORKSPACE_PAGE_HINTS = (
+    "choose a workspace",
+    "select a workspace",
+    "launch a workspace",
+    "workspace",
+    "personal workspace",
+    "personal account",
+    "选择一个工作空间",
+    "选择工作空间",
+)
+_WORKSPACE_IGNORE_LABELS = {
+    "choose a workspace",
+    "select a workspace",
+    "workspace",
+    "terms of use",
+    "privacy policy",
+    "continue",
+    "继续",
+    "allow",
+    "log in",
+    "cancel",
+    "back",
+    "resend email",
+    "use password",
+    "continue with password",
+    "log in with a one-time code",
+    "login with a one-time code",
+    "one-time code",
+    "email code",
+}
+_WORKSPACE_IGNORE_SUBSTRINGS = (
+    "new organization",
+    "finish setting up",
+    "set up on the next page",
+    "one-time code",
+    "email code",
+    "continue with password",
+    "use password",
+)
+
 
 def _is_otp_input_visible(page, timeout=500):
     try:
@@ -275,7 +350,101 @@ def _wait_for_otp_submit_result(page, timeout=12):
     return "pending", None
 
 
-def login_codex_via_browser(email, password, mail_client=None, *, return_result=False):
+def _workspace_target_label(workspace_kind: str) -> str:
+    return "Personal" if normalize_workspace_kind(workspace_kind) == WORKSPACE_KIND_PERSONAL else "Team"
+
+
+def _is_personal_workspace_label(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    return any(token in lowered for token in ("personal", "个人", "free"))
+
+
+def _is_workspace_ignored_label(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if lowered in _WORKSPACE_IGNORE_LABELS:
+        return True
+    return any(token in lowered for token in _WORKSPACE_IGNORE_SUBSTRINGS)
+
+
+def _is_workspace_selection_page(page) -> bool:
+    url = (page.url or "").lower()
+    if "workspace" in url:
+        return True
+
+    try:
+        body = page.locator("body").inner_text(timeout=1200).lower()
+    except Exception:
+        body = ""
+
+    hint_hits = sum(1 for hint in _WORKSPACE_PAGE_HINTS if hint in body)
+    if "organization" in url:
+        return hint_hits >= 2
+    return hint_hits >= 2 or "launch a workspace" in body
+
+
+def _workspace_label_candidates(page):
+    if not _is_workspace_selection_page(page):
+        return []
+
+    selectors = ("button", "a", '[role="button"]', '[role="option"]')
+    seen = set()
+    candidates = []
+    for selector in selectors:
+        try:
+            for loc in page.locator(selector).all():
+                try:
+                    if not loc.is_visible(timeout=100):
+                        continue
+                    text = re.sub(r"\s+", " ", loc.inner_text(timeout=200)).strip()
+                except Exception:
+                    continue
+                lowered = text.lower()
+                if not text or lowered in seen or len(text) > 80 or _is_workspace_ignored_label(lowered):
+                    continue
+                seen.add(lowered)
+                candidates.append((text, loc))
+        except Exception:
+            continue
+    return candidates
+
+
+def _select_workspace_target(page, *, workspace_kind: str, workspace_name: str = "") -> bool:
+    target_kind = normalize_workspace_kind(workspace_kind)
+    preferred_name = str(workspace_name or "").strip()
+    preferred_name_lower = preferred_name.lower()
+    candidates = _workspace_label_candidates(page)
+    target = None
+
+    if target_kind == WORKSPACE_KIND_PERSONAL:
+        for text, loc in candidates:
+            if _is_personal_workspace_label(text):
+                target = (text, loc)
+                break
+    else:
+        if preferred_name:
+            for text, loc in candidates:
+                if text.strip().lower() == preferred_name_lower:
+                    target = (text, loc)
+                    break
+
+    if target is None:
+        return False
+
+    text, loc = target
+    try:
+        loc.click(timeout=3000)
+    except Exception:
+        try:
+            loc.click(force=True, timeout=3000)
+        except Exception:
+            return False
+
+    logger.info("[Codex] 选择 %s workspace: %s", _workspace_target_label(target_kind), text)
+    time.sleep(3)
+    return True
+
+
+def login_codex_via_browser(email, password, mail_client=None, *, return_result=False, workspace_kind="team"):
     """
     通过 Playwright 自动完成 Codex OAuth 登录。
     mail_client: CloudMailClient 实例，用于自动读取登录验证码。
@@ -283,15 +452,17 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
     return_result=True 时返回:
       {ok: bool, bundle: dict|None, error_type: str|None, error_detail: str|None, retryable: bool}
     """
+    workspace_kind = normalize_workspace_kind(workspace_kind)
     code_verifier, code_challenge = _generate_pkce()
     state = secrets.token_urlsafe(16)
     _used_email_ids: set[int] = set()  # 记录已尝试过的邮件，避免重复提交同一封验证码邮件
 
-    chatgpt_account_id = get_chatgpt_account_id()
+    chatgpt_account_id = get_chatgpt_account_id() if workspace_kind == WORKSPACE_KIND_TEAM else ""
+    workspace_name = get_chatgpt_workspace_name() if workspace_kind == WORKSPACE_KIND_TEAM else ""
 
     auth_url = _build_auth_url(code_challenge, state)
 
-    logger.info("[Codex] 开始 OAuth 登录: %s", email)
+    logger.info("[Codex] 开始 OAuth 登录: %s | workspace=%s", email, workspace_kind)
 
     auth_code = None
     failure_result = None
@@ -338,7 +509,7 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
             except Exception:
                 pass
 
-        logger.info("[Codex] 先登录 ChatGPT 选择 Team workspace...")
+        logger.info("[Codex] 先登录 ChatGPT 选择 %s workspace...", _workspace_target_label(workspace_kind))
         _page = context.new_page()
         _page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded", timeout=60000)
         time.sleep(5)
@@ -424,27 +595,9 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
 
         # 如果是 workspace 选择页面，选择 Team
         if "workspace" in _page.url:
-            workspace_name = get_chatgpt_workspace_name()
             logger.info("[Codex] 检测到 workspace 选择页面...")
             try:
-                ws_btn = _page.locator(f'text="{workspace_name}"').first
-                if workspace_name and ws_btn.is_visible(timeout=3000):
-                    logger.info("[Codex] 选择 workspace: %s", workspace_name)
-                    ws_btn.click()
-                    time.sleep(5)
-                else:
-                    # fallback: 选第二个选项（第一个通常是"个人"）
-                    options = _page.locator('a, button, [role="button"]').all()
-                    for opt in options:
-                        try:
-                            text = opt.inner_text(timeout=1000).strip()
-                            if text and "个人" not in text and "Personal" not in text and text not in ("ChatGPT", ""):
-                                logger.info("[Codex] 选择 workspace: %s", text)
-                                opt.click()
-                                time.sleep(5)
-                                break
-                        except Exception:
-                            continue
+                _select_workspace_target(_page, workspace_kind=workspace_kind, workspace_name=workspace_name)
             except Exception:
                 pass
             _screenshot(_page, "codex_00_after_workspace.png")
@@ -634,65 +787,19 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
             try:
                 page_text = page.inner_text("body")[:1000]
 
-                # 选择 Team workspace（用配置的名称精确匹配）
-                workspace_name = get_chatgpt_workspace_name()
-                # 检测"选择一个工作空间"页面，点击 Team workspace
-                if workspace_name and (
-                    "选择一个工作空间" in page_text or "Select a workspace" in page_text or "选择工作空间" in page_text
-                ):
-                    selected = False
+                # 检测"选择一个工作空间"页面，点击目标 workspace
+                if "选择一个工作空间" in page_text or "Select a workspace" in page_text or "选择工作空间" in page_text:
                     _screenshot(page, f"codex_04_workspace_{step + 1}_before.png")
-                    logger.info("[Codex] 检测到工作空间选择页 (step %d)，尝试选择: %s", step + 1, workspace_name)
-
-                    # 用 JS 直接点击包含 workspace 名称的元素（最可靠）
-                    try:
-                        clicked = page.evaluate(
-                            """(name) => {
-                            const els = document.querySelectorAll('*');
-                            for (const el of els) {
-                                const text = (el.textContent || '').trim();
-                                if (text === name && !text.includes('个人') && !text.includes('Personal')) {
-                                    // 找到最近的可点击父元素
-                                    let target = el;
-                                    while (target && target.tagName !== 'BODY') {
-                                        const tag = target.tagName.toLowerCase();
-                                        if (['button', 'a', 'li', 'label'].includes(tag)
-                                            || target.getAttribute('role')
-                                            || target.onclick
-                                            || target.classList.length > 0) {
-                                            target.click();
-                                            return true;
-                                        }
-                                        target = target.parentElement;
-                                    }
-                                    el.click();
-                                    return true;
-                                }
-                            }
-                            return false;
-                        }""",
-                            workspace_name,
-                        )
-                        if clicked:
-                            time.sleep(1)
-                            selected = True
-                            logger.info("[Codex] 已选择 workspace (JS): %s (step %d)", workspace_name, step + 1)
-                    except Exception as e:
-                        logger.warning("[Codex] JS 选择 workspace 失败: %s", e)
-
-                    if not selected:
-                        # fallback: Playwright 选择器
-                        try:
-                            ws_el = page.locator(f"text={workspace_name}").first
-                            if ws_el.is_visible(timeout=2000):
-                                ws_el.click(force=True)
-                                time.sleep(1)
-                                selected = True
-                                logger.info(
-                                    "[Codex] 已选择 workspace (force click): %s (step %d)", workspace_name, step + 1
-                                )
-                        except Exception:
-                            pass
+                    logger.info(
+                        "[Codex] 检测到工作空间选择页 (step %d)，尝试选择 %s workspace",
+                        step + 1,
+                        _workspace_target_label(workspace_kind),
+                    )
+                    selected = _select_workspace_target(
+                        page,
+                        workspace_kind=workspace_kind,
+                        workspace_name=workspace_name,
+                    )
 
                     _screenshot(page, f"codex_04_workspace_{step + 1}_after.png")
                     if selected:
@@ -707,16 +814,16 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
                             pass
                         continue
                     else:
-                        logger.warning("[Codex] 无法选择 workspace '%s' (step %d)", workspace_name, step + 1)
+                        logger.warning("[Codex] 无法选择目标 workspace (step %d)", step + 1)
 
-                elif workspace_name:
-                    # 非工作空间选择页，但可能有 workspace 文本（如 organization 页）
+                elif _is_workspace_selection_page(page):
                     try:
-                        ws_btn = page.locator(f'text="{workspace_name}"').first
-                        if ws_btn.is_visible(timeout=1000):
-                            ws_btn.click()
-                            time.sleep(1)
-                            logger.info("[Codex] 已选择 workspace: %s (step %d)", workspace_name, step + 1)
+                        if _select_workspace_target(page, workspace_kind=workspace_kind, workspace_name=workspace_name):
+                            logger.info(
+                                "[Codex] 已补充选择 %s workspace (step %d)",
+                                _workspace_target_label(workspace_kind),
+                                step + 1,
+                            )
                     except Exception:
                         pass
 
@@ -919,7 +1026,7 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
             }
         return None
 
-    bundle = _exchange_auth_code(auth_code, code_verifier, fallback_email=email)
+    bundle = _exchange_auth_code(auth_code, code_verifier, fallback_email=email, workspace_kind=workspace_kind)
     if return_result:
         if bundle:
             return {"ok": True, "bundle": bundle, "error_type": None, "error_detail": None, "retryable": False}
@@ -1348,21 +1455,34 @@ def login_main_codex():
     return login_codex_via_session()
 
 
-def save_auth_file(bundle):
-    """保存 CPA 兼容的认证文件。同一邮箱只保留一个文件，优先 team。"""
-    ensure_auth_dir()
-
+def build_auth_filename(bundle, *, workspace_kind=None):
     email = bundle["email"]
     plan_type = bundle.get("plan_type", "unknown")
     account_id = bundle.get("account_id", "")
-    hash_id = hashlib.md5(account_id.encode()).hexdigest()[:8]
+    hash_id = hashlib.md5(account_id.encode()).hexdigest()[:8] if account_id else "unknown"
+    resolved_workspace_kind = normalize_workspace_kind(workspace_kind or infer_workspace_kind(bundle))
+    if resolved_workspace_kind == WORKSPACE_KIND_TEAM:
+        return f"codex-{email}-{plan_type}-{hash_id}.json"
+    return f"codex-{email}-{resolved_workspace_kind}-{plan_type}-{hash_id}.json"
 
-    # 清理同一邮箱的旧文件（避免 free/team 并存）
-    for old in AUTH_DIR.glob(f"codex-{email}-*.json"):
+
+def save_auth_file(bundle, *, workspace_kind=None):
+    """保存 Codex 认证文件。team / personal 认证可并存。"""
+    ensure_auth_dir()
+
+    email = bundle["email"]
+    resolved_workspace_kind = normalize_workspace_kind(workspace_kind or infer_workspace_kind(bundle))
+
+    pattern = (
+        f"codex-{email}-team-*.json"
+        if resolved_workspace_kind == WORKSPACE_KIND_TEAM
+        else f"codex-{email}-personal-*.json"
+    )
+    for old in AUTH_DIR.glob(pattern):
         old.unlink()
         logger.info("[Codex] 清理旧文件: %s", old.name)
 
-    filename = f"codex-{email}-{plan_type}-{hash_id}.json"
+    filename = build_auth_filename(bundle, workspace_kind=resolved_workspace_kind)
     filepath = AUTH_DIR / filename
     return _write_auth_file(filepath, bundle)
 

@@ -8,10 +8,13 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from autoteam.accounts import (
+    PERSONAL_CONTEXT,
     STATUS_ACTIVE,
     STATUS_EXHAUSTED,
     STATUS_STANDBY,
+    TEAM_CONTEXT,
     add_account,
+    context_updates,
     find_account,
     load_accounts,
     update_account,
@@ -22,6 +25,7 @@ from autoteam.codex_auth import (
     _exchange_auth_code,
     _generate_pkce,
     check_codex_quota,
+    infer_workspace_kind,
     quota_result_quota_info,
     quota_result_resets_at,
     save_auth_file,
@@ -229,7 +233,8 @@ class ManualAccountFlow:
         if not email:
             raise RuntimeError("OAuth token 中缺少邮箱")
 
-        auth_file = save_auth_file(bundle)
+        workspace_kind = infer_workspace_kind(bundle)
+        auth_file = save_auth_file(bundle, workspace_kind=workspace_kind)
         plan_type = bundle.get("plan_type") or "unknown"
         account_status = STATUS_ACTIVE if plan_type == "team" else STATUS_STANDBY
 
@@ -238,27 +243,59 @@ class ManualAccountFlow:
         if not account:
             add_account(email, "")
 
-        update_fields = {
-            "status": account_status,
-            "auth_file": auth_file,
-            "quota_exhausted_at": None,
-            "quota_resets_at": None,
-            "last_active_at": time.time(),
-        }
+        if workspace_kind == TEAM_CONTEXT:
+            update_fields = {
+                "status": account_status,
+                "auth_file": auth_file,
+                "account_id": bundle.get("account_id") or None,
+                "plan_type": plan_type,
+                "quota_exhausted_at": None,
+                "quota_resets_at": None,
+                "last_active_at": time.time(),
+            }
+        else:
+            update_fields = context_updates(
+                PERSONAL_CONTEXT,
+                status=STATUS_ACTIVE,
+                auth_file=auth_file,
+                account_id=bundle.get("account_id") or None,
+                plan_type=plan_type,
+                quota_exhausted_at=None,
+                quota_resets_at=None,
+                last_active_at=time.time(),
+            )
 
         token = bundle.get("access_token")
         account_id = bundle.get("account_id")
         if token and account_id:
             quota_status, quota_info = check_codex_quota(token, account_id=account_id)
             if quota_status == "ok" and isinstance(quota_info, dict):
-                update_fields["last_quota"] = quota_info
+                update_fields.update(
+                    context_updates(workspace_kind, last_quota=quota_info)
+                    if workspace_kind == PERSONAL_CONTEXT
+                    else {"last_quota": quota_info}
+                )
             elif quota_status == "exhausted":
                 snapshot = quota_result_quota_info(quota_info)
                 if snapshot:
-                    update_fields["last_quota"] = snapshot
-                update_fields["status"] = STATUS_EXHAUSTED
-                update_fields["quota_exhausted_at"] = time.time()
-                update_fields["quota_resets_at"] = quota_result_resets_at(quota_info) or int(time.time() + 18000)
+                    update_fields.update(
+                        context_updates(workspace_kind, last_quota=snapshot)
+                        if workspace_kind == PERSONAL_CONTEXT
+                        else {"last_quota": snapshot}
+                    )
+                if workspace_kind == PERSONAL_CONTEXT:
+                    update_fields.update(
+                        context_updates(
+                            PERSONAL_CONTEXT,
+                            status=STATUS_EXHAUSTED,
+                            quota_exhausted_at=time.time(),
+                            quota_resets_at=quota_result_resets_at(quota_info) or int(time.time() + 18000),
+                        )
+                    )
+                else:
+                    update_fields["status"] = STATUS_EXHAUSTED
+                    update_fields["quota_exhausted_at"] = time.time()
+                    update_fields["quota_resets_at"] = quota_result_resets_at(quota_info) or int(time.time() + 18000)
 
         update_account(email, **update_fields)
         sync_to_cpa()

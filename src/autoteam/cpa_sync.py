@@ -11,6 +11,7 @@ from pathlib import Path
 import requests
 
 from autoteam.auth_storage import AUTH_DIR, ensure_auth_dir, ensure_auth_file_permissions
+from autoteam.codex_auth import build_auth_filename, infer_workspace_kind, normalize_workspace_kind
 from autoteam.config import CPA_KEY, CPA_URL
 from autoteam.textio import write_text
 
@@ -139,7 +140,7 @@ def _bundle_from_auth_data(auth_data, fallback_name=""):
     if not plan_type:
         plan_type = "unknown"
 
-    return {
+    bundle = {
         "id_token": id_token,
         "access_token": auth_data.get("access_token", ""),
         "refresh_token": auth_data.get("refresh_token", ""),
@@ -149,6 +150,11 @@ def _bundle_from_auth_data(auth_data, fallback_name=""):
         "expired": _parse_expired_timestamp(auth_data.get("expired")),
         "last_refresh_ts": _parse_optional_timestamp(auth_data.get("last_refresh")),
     }
+    bundle["workspace_kind"] = infer_workspace_kind(
+        {"workspace_kind": auth_data.get("workspace_kind"), "plan_type": plan_type},
+        fallback_name=fallback_name,
+    )
+    return bundle
 
 
 def _normalized_auth_path(bundle, main=False):
@@ -157,15 +163,18 @@ def _normalized_auth_path(bundle, main=False):
     if main:
         suffix = account_id or md5(email.encode()).hexdigest()[:8]
         return AUTH_DIR / f"codex-main-{suffix}.json"
-    plan_type = bundle.get("plan_type", "unknown")
-    hash_id = md5(account_id.encode()).hexdigest()[:8] if account_id else "unknown"
-    return AUTH_DIR / f"codex-{email}-{plan_type}-{hash_id}.json"
+    return AUTH_DIR / build_auth_filename(bundle, workspace_kind=bundle.get("workspace_kind"))
 
 
 def _auth_identity(bundle, main=False):
     if main:
         return ("main", bundle.get("account_id") or bundle.get("email") or "")
-    return ("codex", (bundle.get("email") or "").lower(), bundle.get("account_id") or "")
+    return (
+        "codex",
+        (bundle.get("email") or "").lower(),
+        normalize_workspace_kind(bundle.get("workspace_kind")),
+        bundle.get("account_id") or "",
+    )
 
 
 def _candidate_score(auth_data, bundle, name, main=False):
@@ -204,7 +213,9 @@ def _save_normalized_auth_file(bundle, main=False):
                 old.unlink()
     else:
         email = bundle.get("email", "")
-        for old in AUTH_DIR.glob(f"codex-{email}-*.json"):
+        workspace_kind = normalize_workspace_kind(bundle.get("workspace_kind"))
+        pattern = f"codex-{email}-team-*.json" if workspace_kind == "team" else f"codex-{email}-personal-*.json"
+        for old in AUTH_DIR.glob(pattern):
             if old != filepath and old.exists():
                 old.unlink()
 
@@ -282,21 +293,22 @@ def _cleanup_local_duplicates(accounts=None):
     if accounts is not None:
         changed = False
         for acc in accounts:
-            auth_path = acc.get("auth_file")
-            if not auth_path:
-                continue
-            try:
-                path = Path(auth_path)
-                if not path.exists():
+            for field in ("auth_file", "personal_auth_file"):
+                auth_path = acc.get(field)
+                if not auth_path:
                     continue
-                auth_data = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            bundle = _bundle_from_auth_data(auth_data, fallback_name=path.name)
-            canonical_path = canonical_map.get(_auth_identity(bundle, main=False))
-            if canonical_path and acc.get("auth_file") != str(canonical_path.resolve()):
-                acc["auth_file"] = str(canonical_path.resolve())
-                changed = True
+                try:
+                    path = Path(auth_path)
+                    if not path.exists():
+                        continue
+                    auth_data = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                bundle = _bundle_from_auth_data(auth_data, fallback_name=path.name)
+                canonical_path = canonical_map.get(_auth_identity(bundle, main=False))
+                if canonical_path and acc.get(field) != str(canonical_path.resolve()):
+                    acc[field] = str(canonical_path.resolve())
+                    changed = True
         return removed, changed
 
     return removed, False
@@ -311,7 +323,15 @@ def sync_from_cpa():
     - 非主号文件会导入/修复到 accounts.json，默认状态为 standby（保守导入）
     - 不删除本地账号记录，仅补充/更新 auth_file
     """
-    from autoteam.accounts import STATUS_STANDBY, find_account, load_accounts, save_accounts
+    from autoteam.accounts import (
+        PERSONAL_CONTEXT,
+        STATUS_STANDBY,
+        TEAM_CONTEXT,
+        context_updates,
+        find_account,
+        load_accounts,
+        save_accounts,
+    )
 
     AUTH_DIR.mkdir(exist_ok=True)
 
@@ -461,27 +481,45 @@ def sync_from_cpa():
 
         acc = find_account(accounts, email)
         resolved_path = str(normalized_path.resolve())
+        context = normalize_workspace_kind(bundle.get("workspace_kind"))
+        auth_updates = context_updates(
+            context,
+            auth_file=resolved_path,
+            account_id=bundle.get("account_id") or None,
+            plan_type=bundle.get("plan_type") or None,
+        )
         if acc:
-            if acc.get("auth_file") != resolved_path:
-                acc["auth_file"] = resolved_path
+            before = {key: acc.get(key) for key in auth_updates}
+            acc.update(auth_updates)
+            if context == PERSONAL_CONTEXT and not acc.get("personal_status"):
+                acc["personal_status"] = STATUS_STANDBY
+            if before != {key: acc.get(key) for key in auth_updates}:
                 changed_accounts = True
                 updated_accounts += 1
         else:
-            accounts.append(
-                {
-                    "email": email,
-                    "password": "",
-                    "mail_provider": "",
-                    "mail_account_id": None,
-                    "cloudmail_account_id": None,
-                    "status": STATUS_STANDBY,
-                    "auth_file": resolved_path,
-                    "quota_exhausted_at": None,
-                    "quota_resets_at": None,
-                    "created_at": time.time(),
-                    "last_active_at": None,
-                }
-            )
+            record = {
+                "email": email,
+                "password": "",
+                "mail_provider": "",
+                "mail_account_id": None,
+                "cloudmail_account_id": None,
+                "status": STATUS_STANDBY,
+                "quota_exhausted_at": None,
+                "quota_resets_at": None,
+                "created_at": time.time(),
+                "last_active_at": None,
+            }
+            if context == TEAM_CONTEXT:
+                record.update(auth_updates)
+            else:
+                record.update(
+                    auth_file=None,
+                    account_id=None,
+                    plan_type=None,
+                    **auth_updates,
+                    personal_status=STATUS_STANDBY,
+                )
+            accounts.append(record)
             changed_accounts = True
             added_accounts += 1
 
@@ -524,6 +562,7 @@ def sync_to_cpa():
     - CPA 有但不是 active（或本地已删除）→ 从 CPA 删除
     """
     from autoteam.accounts import STATUS_ACTIVE, load_accounts, save_accounts
+    from autoteam.config import SYNC_PERSONAL_TO_CPA
 
     accounts = load_accounts()
     local_emails = {a["email"].lower() for a in accounts}
@@ -536,9 +575,17 @@ def sync_to_cpa():
     for acc in accounts:
         auth_path = acc.get("auth_file")
         if auth_path and not Path(auth_path).exists():
-            matches = list(AUTH_DIR.glob(f"codex-{acc['email']}-*.json"))
+            matches = list(AUTH_DIR.glob(f"codex-{acc['email']}-team-*.json"))
+            if not matches:
+                matches = list(AUTH_DIR.glob(f"codex-{acc['email']}-*.json"))
             if matches:
                 acc["auth_file"] = str(matches[0].resolve())
+                changed = True
+        personal_auth_path = acc.get("personal_auth_file")
+        if personal_auth_path and not Path(personal_auth_path).exists():
+            matches = list(AUTH_DIR.glob(f"codex-{acc['email']}-personal-*.json"))
+            if matches:
+                acc["personal_auth_file"] = str(matches[0].resolve())
                 changed = True
     if changed:
         save_accounts(accounts)
@@ -548,6 +595,10 @@ def sync_to_cpa():
     for acc in accounts:
         if acc["status"] == STATUS_ACTIVE and acc.get("auth_file"):
             path = Path(acc["auth_file"])
+            if path.exists():
+                active_files[path.name] = path
+        if SYNC_PERSONAL_TO_CPA and acc.get("personal_status") == STATUS_ACTIVE and acc.get("personal_auth_file"):
+            path = Path(acc["personal_auth_file"])
             if path.exists():
                 active_files[path.name] = path
 
