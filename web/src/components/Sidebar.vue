@@ -90,6 +90,7 @@ const items = [
   { key: 'dashboard', icon: '📊', label: '仪表盘', mobileLabel: '仪表盘', hint: '概览账号池与状态' },
   { key: 'config', icon: '🧩', label: '配置面板', mobileLabel: '配置', hint: '统一编辑系统配置' },
   { key: 'team', icon: '👥', label: 'Team 成员', mobileLabel: '成员', hint: '查看与管理成员' },
+  { key: 'personal', icon: '🆓', label: '个人账号管理', mobileLabel: '个人', hint: '管理 Personal/free 登录与状态' },
   { key: 'pool', icon: '🔁', label: '账号池操作', mobileLabel: '账号池', hint: '轮转、补位与清理' },
   { key: 'sync', icon: '🔄', label: '同步中心', mobileLabel: '同步', hint: '同步本地、远端与状态' },
   { key: 'oauth', icon: '🔐', label: 'OAuth 登录', mobileLabel: 'OAuth', hint: '手动接管 OAuth 流程' },

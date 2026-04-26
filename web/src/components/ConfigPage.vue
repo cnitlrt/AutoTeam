@@ -212,6 +212,32 @@
           </div>
         </div>
 
+        <div class="rounded-2xl border border-white/10 bg-white/5 p-5">
+          <div class="mb-4">
+            <div class="text-sm font-medium text-white">Personal / free 溢出与同步</div>
+            <div class="mt-1 text-xs leading-5 text-slate-400">
+              控制 Team exhausted 后是否自动切到 Personal/free，以及 Personal 认证是否同步到已启用远端。
+            </div>
+          </div>
+          <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div v-for="field in personalOverflowFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+              <label class="mb-2 block text-sm font-medium text-slate-300">
+                {{ field.prompt }}
+                <div v-if="personalFieldHint(field.key)" class="mt-1 font-mono text-[11px] font-normal text-slate-500 break-all">
+                  {{ personalFieldHint(field.key) }}
+                </div>
+              </label>
+              <select
+                v-model="runtimeForm[field.key]"
+                class="input-dark"
+              >
+                <option value="true">启用</option>
+                <option value="false">关闭</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
         <div v-if="syncCpaEnabled" class="rounded-2xl border border-white/10 bg-white/5 p-5">
           <div class="mb-4">
             <div class="text-sm font-medium text-white">CPA</div>
@@ -500,6 +526,9 @@ const runtimeCategoryKeys = {
   sync: [
     'SYNC_TARGET_CPA',
     'SYNC_TARGET_SUB2API',
+    'ENABLE_PERSONAL_OVERFLOW',
+    'SYNC_PERSONAL_TO_CPA',
+    'SYNC_PERSONAL_TO_SUB2API',
     'CPA_URL',
     'CPA_KEY',
     'SUB2API_URL',
@@ -533,8 +562,8 @@ const runtimeCategoryMeta = {
     icon: '☁️',
     badge: 'Remote Sync',
     title: '远端同步',
-    description: '先选择启用的远端同步目标，再填写对应的连接信息。账号池操作会根据这里的启用状态决定同步到哪些远端。',
-    note: '支持同时启用 CPA 和 Sub2API；界面只显示当前已启用目标的详细配置。',
+    description: '先选择启用的远端同步目标，再填写对应的连接信息。这里也统一管理 Personal/free 溢出与 Personal 认证同步策略。',
+    note: '支持同时启用 CPA 和 Sub2API；界面只显示当前已启用目标的详细配置，并额外展示 Personal/free 相关开关。',
   },
   proxy: {
     icon: '🛰️',
@@ -582,6 +611,11 @@ const sourceLoaded = ref(false)
 const sourceMessage = ref('')
 const sourceMessageClass = ref('')
 const runtimeRequiredKeys = new Set(['API_KEY'])
+const personalFieldHints = {
+  ENABLE_PERSONAL_OVERFLOW: 'ENV: ENABLE_PERSONAL_OVERFLOW · exhausted → personal/free overflow',
+  SYNC_PERSONAL_TO_CPA: 'ENV: SYNC_PERSONAL_TO_CPA · sync personal auths to CPA',
+  SYNC_PERSONAL_TO_SUB2API: 'ENV: SYNC_PERSONAL_TO_SUB2API · sync personal auths to Sub2API',
+}
 const sub2apiFieldHints = {
   SUB2API_URL: 'ENV: SUB2API_URL · Sub2API API base URL',
   SUB2API_EMAIL: 'ENV: SUB2API_EMAIL · login.email',
@@ -609,6 +643,10 @@ function sub2apiFieldHint(key) {
   return sub2apiFieldHints[key] || ''
 }
 
+function personalFieldHint(key) {
+  return personalFieldHints[key] || ''
+}
+
 function fieldsByKeys(keys) {
   return keys
     .map(key => fieldByKey(key))
@@ -618,6 +656,11 @@ function fieldsByKeys(keys) {
 const securityFields = computed(() => fieldsByKeys(runtimeCategoryKeys.security))
 const proxyFields = computed(() => fieldsByKeys(runtimeCategoryKeys.proxy))
 const syncToggleFields = computed(() => fieldsByKeys(['SYNC_TARGET_CPA', 'SYNC_TARGET_SUB2API']))
+const personalOverflowFields = computed(() => fieldsByKeys([
+  'ENABLE_PERSONAL_OVERFLOW',
+  'SYNC_PERSONAL_TO_CPA',
+  'SYNC_PERSONAL_TO_SUB2API',
+]))
 const selectedMailProvider = computed(() => String(runtimeForm.MAIL_PROVIDER || 'cloudmail').toLowerCase() === 'cloudflare_temp_email' ? 'cloudflare_temp_email' : 'cloudmail')
 const cloudmailProviderFields = computed(() => fieldsByKeys(['CLOUDMAIL_BASE_URL', 'CLOUDMAIL_EMAIL', 'CLOUDMAIL_PASSWORD', 'CLOUDMAIL_DOMAIN']))
 const cfTempEmailFields = computed(() => fieldsByKeys(['CF_TEMP_EMAIL_BASE_URL', 'CF_TEMP_EMAIL_ADMIN_PASSWORD', 'CF_TEMP_EMAIL_DOMAIN']))
@@ -772,6 +815,9 @@ function isToggleField(key) {
 
 function isBooleanStringField(key) {
   return isToggleField(key) || [
+    'ENABLE_PERSONAL_OVERFLOW',
+    'SYNC_PERSONAL_TO_CPA',
+    'SYNC_PERSONAL_TO_SUB2API',
     'SUB2API_AUTO_PAUSE_ON_EXPIRED',
     'SUB2API_OPENAI_PASSTHROUGH',
     'SUB2API_OVERWRITE_ACCOUNT_SETTINGS',

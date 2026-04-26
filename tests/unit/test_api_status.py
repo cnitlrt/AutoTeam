@@ -254,6 +254,119 @@ def test_get_runtime_config_switches_required_mail_fields_by_provider(tmp_path, 
     assert fields["CLOUDMAIL_EMAIL"]["runtime_required"] is False
 
 
+def test_get_status_includes_personal_quota_cache(tmp_path, monkeypatch):
+    personal_auth = tmp_path / "codex-user@example.com-personal-free.json"
+    personal_auth.write_text(
+        json.dumps({"access_token": "token-personal", "account_id": "personal-acc"}), encoding="utf-8"
+    )
+
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {
+                "email": "user@example.com",
+                "status": "standby",
+                "auth_file": None,
+                "personal_status": "active",
+                "personal_auth_file": str(personal_auth),
+                "personal_last_quota": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(api, "_is_main_account_email", lambda email: False)
+    monkeypatch.setattr(
+        "autoteam.codex_auth.check_codex_quota",
+        lambda access_token, account_id=None: (
+            "ok",
+            {
+                "primary_pct": 12,
+                "primary_resets_at": 1710000000,
+                "weekly_pct": 20,
+                "weekly_resets_at": 1710600000,
+                "account_id": account_id,
+            },
+        ),
+    )
+
+    result = api.get_status()
+
+    assert result["personal_quota_cache"]["user@example.com"]["primary_pct"] == 12
+    assert result["personal_quota_cache"]["user@example.com"]["account_id"] == "personal-acc"
+
+
+def test_post_account_login_personal_uses_personal_workspace(monkeypatch):
+    updates = []
+    saved = []
+    login_calls = []
+
+    monkeypatch.setattr(api, "_is_main_account_email", lambda email: False)
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [{"email": "user@example.com", "password": "", "mail_provider": "cloudmail"}],
+    )
+    monkeypatch.setattr(
+        "autoteam.accounts.find_account",
+        lambda accounts, email: {"email": email, "password": "", "mail_provider": "cloudmail"},
+    )
+    monkeypatch.setattr(api, "_require_account_mail_configs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(api, "_require_sync_target_configs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "autoteam.mail_provider.get_mail_client_for_account",
+        lambda _acc: type("MailClient", (), {"login": lambda self: None})(),
+    )
+
+    def fake_login(email, password, mail_client=None, workspace_kind="team", **kwargs):
+        login_calls.append(workspace_kind)
+        return {
+            "email": email,
+            "access_token": "token-personal",
+            "refresh_token": "refresh-personal",
+            "id_token": "",
+            "account_id": "personal-acc",
+            "plan_type": "free",
+            "workspace_kind": "personal",
+        }
+
+    monkeypatch.setattr("autoteam.codex_auth.login_codex_via_browser", fake_login)
+    monkeypatch.setattr("autoteam.codex_auth.infer_workspace_kind", lambda bundle: bundle.get("workspace_kind"))
+    monkeypatch.setattr(
+        "autoteam.codex_auth.save_auth_file",
+        lambda bundle, workspace_kind=None: saved.append(workspace_kind) or f"/tmp/{workspace_kind}.json",
+    )
+    monkeypatch.setattr(
+        "autoteam.codex_auth.check_codex_quota",
+        lambda access_token, account_id=None: (
+            "ok",
+            {
+                "primary_pct": 0,
+                "primary_resets_at": 1710000000,
+                "weekly_pct": 0,
+                "weekly_resets_at": 1710600000,
+            },
+        ),
+    )
+    monkeypatch.setattr("autoteam.accounts.update_account", lambda email, **kwargs: updates.append((email, kwargs)))
+    monkeypatch.setattr("autoteam.sync_targets.sync_to_configured_targets", lambda: None)
+    monkeypatch.setattr(
+        api,
+        "_start_task",
+        lambda command, func, params, *args, **kwargs: {
+            "task_id": "task-1",
+            "command": command,
+            "params": params,
+            "result": func(),
+        },
+    )
+
+    result = api.post_account_login(api.LoginAccountParams(email="user@example.com", workspace_kind="personal"))
+
+    assert result["command"] == "login:personal:user@example.com"
+    assert login_calls == ["personal"]
+    assert saved == ["personal"]
+    assert result["result"]["workspace_kind"] == "personal"
+    assert any("personal_auth_file" in payload for _email, payload in updates)
+
+
 def test_put_runtime_config_allows_partial_runtime_fields_when_api_key_exists(monkeypatch):
     written = {}
 
@@ -353,6 +466,29 @@ def test_put_runtime_config_accepts_numeric_sub2api_proxy(monkeypatch):
 
     assert result["message"] == "配置保存成功"
     assert written["SUB2API_PROXY"] == "15"
+
+
+def test_put_runtime_config_accepts_personal_overflow_sync_toggles(monkeypatch):
+    written = {}
+
+    monkeypatch.setattr("autoteam.setup_wizard._write_env", lambda key, value: written.setdefault(key, value))
+    monkeypatch.setattr("importlib.reload", lambda module: module)
+    monkeypatch.setattr(api, "API_KEY", "old-key")
+    monkeypatch.setenv("API_KEY", "old-key")
+
+    result = api.put_runtime_config(
+        api.SetupConfig(
+            API_KEY="old-key",
+            ENABLE_PERSONAL_OVERFLOW=True,
+            SYNC_PERSONAL_TO_CPA=True,
+            SYNC_PERSONAL_TO_SUB2API="true",
+        )
+    )
+
+    assert result["message"] == "配置保存成功"
+    assert written["ENABLE_PERSONAL_OVERFLOW"] == "true"
+    assert written["SYNC_PERSONAL_TO_CPA"] == "true"
+    assert written["SYNC_PERSONAL_TO_SUB2API"] == "true"
 
 
 def test_set_auto_check_config_persists_values_to_env(monkeypatch):

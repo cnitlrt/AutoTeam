@@ -101,6 +101,9 @@ class SetupConfig(BaseModel):
     SUB2API_OPENAI_WS_MODE: str = "off"
     SUB2API_OPENAI_PASSTHROUGH: str | bool = "false"
     SUB2API_OVERWRITE_ACCOUNT_SETTINGS: str | bool = "false"
+    ENABLE_PERSONAL_OVERFLOW: str | bool = "false"
+    SYNC_PERSONAL_TO_CPA: str | bool = "false"
+    SYNC_PERSONAL_TO_SUB2API: str | bool = "false"
     PLAYWRIGHT_PROXY_URL: str = ""
     PLAYWRIGHT_PROXY_BYPASS: str = ""
     API_KEY: str = ""
@@ -553,6 +556,9 @@ def _validate_runtime_optional_values(values: dict[str, str]):
     _normalize_bool("SUB2API_AUTO_PAUSE_ON_EXPIRED")
     _normalize_bool("SUB2API_OPENAI_PASSTHROUGH")
     _normalize_bool("SUB2API_OVERWRITE_ACCOUNT_SETTINGS")
+    _normalize_bool("ENABLE_PERSONAL_OVERFLOW")
+    _normalize_bool("SYNC_PERSONAL_TO_CPA")
+    _normalize_bool("SYNC_PERSONAL_TO_SUB2API")
 
     ws_mode = str(normalized.get("SUB2API_OPENAI_WS_MODE", "") or "").strip().lower()
     if ws_mode:
@@ -1098,12 +1104,16 @@ def _quota_snapshot_status(quota_info: dict | None) -> str:
     return "exhausted" if any(value >= 100 for value in values) else "active"
 
 
-def _resolve_status_auth_file(acc: dict) -> str:
-    auth_file = (acc.get("auth_file") or "").strip()
+def _resolve_status_auth_file(acc: dict, *, workspace_kind: str = "team") -> str:
+    auth_file = (
+        (acc.get("personal_auth_file") or "").strip()
+        if workspace_kind == "personal"
+        else (acc.get("auth_file") or "").strip()
+    )
     if auth_file and Path(auth_file).exists():
         return auth_file
 
-    if _is_main_account_email(acc.get("email")):
+    if workspace_kind == "team" and _is_main_account_email(acc.get("email")):
         from autoteam.codex_auth import get_saved_main_auth_file
 
         saved_auth_file = get_saved_main_auth_file()
@@ -1872,6 +1882,7 @@ def post_kick_account(email: str):
 
 class LoginAccountParams(BaseModel):
     email: str
+    workspace_kind: str = "team"
 
 
 @app.post("/api/accounts/login", status_code=202)
@@ -1880,6 +1891,9 @@ def post_account_login(params: LoginAccountParams):
     from autoteam.accounts import find_account, load_accounts
 
     email = params.email.strip().lower()
+    requested_workspace_kind = (params.workspace_kind or "team").strip().lower()
+    if requested_workspace_kind not in {"team", "personal"}:
+        raise HTTPException(status_code=400, detail="workspace_kind 只能是 team 或 personal")
     if _is_main_account_email(email):
         raise HTTPException(status_code=400, detail="主号不属于账号池登录对象")
     accounts = load_accounts()
@@ -1890,7 +1904,14 @@ def post_account_login(params: LoginAccountParams):
     _require_sync_target_configs("登录账号")
 
     def _run():
-        from autoteam.accounts import PERSONAL_CONTEXT, STATUS_ACTIVE, TEAM_CONTEXT, context_updates, update_account
+        from autoteam.accounts import (
+            PERSONAL_CONTEXT,
+            STATUS_ACTIVE,
+            STATUS_EXHAUSTED,
+            TEAM_CONTEXT,
+            context_updates,
+            update_account,
+        )
         from autoteam.codex_auth import (
             check_codex_quota,
             infer_workspace_kind,
@@ -1903,9 +1924,19 @@ def post_account_login(params: LoginAccountParams):
 
         mail_client = get_mail_client_for_account(acc)
         mail_client.login()
-        bundle = login_codex_via_browser(email, acc.get("password", ""), mail_client=mail_client)
+        bundle = login_codex_via_browser(
+            email,
+            acc.get("password", ""),
+            mail_client=mail_client,
+            workspace_kind=requested_workspace_kind,
+            workspace_account_id=(
+                (acc.get("personal_account_id") or "") if requested_workspace_kind == PERSONAL_CONTEXT else ""
+            ),
+        )
         if bundle:
             workspace_kind = infer_workspace_kind(bundle)
+            if requested_workspace_kind == PERSONAL_CONTEXT and workspace_kind != PERSONAL_CONTEXT:
+                raise RuntimeError("未进入 Personal 个人账号 workspace，请重试")
             auth_file = save_auth_file(bundle, workspace_kind=workspace_kind)
             if workspace_kind == TEAM_CONTEXT:
                 update_account(
@@ -1941,18 +1972,53 @@ def post_account_login(params: LoginAccountParams):
                             update_account(email, last_quota=quota_info)
                         update_account(
                             email,
-                            status="exhausted",
+                            status=STATUS_EXHAUSTED,
                             quota_exhausted_at=time.time(),
                             quota_resets_at=quota_result_resets_at(info) or int(time.time() + 18000),
+                        )
+            elif workspace_kind == PERSONAL_CONTEXT:
+                token = bundle.get("access_token")
+                if token:
+                    st, info = check_codex_quota(token, account_id=bundle.get("account_id"))
+                    if st == "ok" and isinstance(info, dict):
+                        update_account(
+                            email,
+                            **context_updates(
+                                PERSONAL_CONTEXT,
+                                last_quota=info,
+                                status=STATUS_ACTIVE,
+                                last_active_at=time.time(),
+                                quota_exhausted_at=None,
+                                quota_resets_at=info.get("primary_resets_at") or None,
+                            ),
+                        )
+                    elif st == "exhausted":
+                        quota_info = quota_result_quota_info(info)
+                        update_account(
+                            email,
+                            **context_updates(
+                                PERSONAL_CONTEXT,
+                                status=STATUS_EXHAUSTED,
+                                quota_exhausted_at=time.time(),
+                                quota_resets_at=quota_result_resets_at(info) or int(time.time() + 18000),
+                                last_quota=quota_info,
+                            ),
                         )
             # 同步到已启用远端
             from autoteam.sync_targets import sync_to_configured_targets as sync_to_cpa
 
             sync_to_cpa()
-            return {"email": email, "plan": bundle.get("plan_type"), "auth_file": auth_file}
+            return {
+                "email": email,
+                "plan": bundle.get("plan_type"),
+                "auth_file": auth_file,
+                "workspace_kind": workspace_kind,
+            }
         raise RuntimeError(f"Codex 登录失败: {email}")
 
-    task = _start_task(f"login:{email}", _run, {"email": email})
+    task = _start_task(
+        f"login:{requested_workspace_kind}:{email}", _run, {"email": email, "workspace_kind": requested_workspace_kind}
+    )
     return task
 
 
@@ -1971,26 +2037,52 @@ def get_status():
 
     accounts = load_accounts()
     quota_cache = {}
+    personal_quota_cache = {}
 
     for acc in accounts:
-        if acc["status"] not in (STATUS_ACTIVE, STATUS_AUTH_PENDING) and not _is_main_account_email(acc.get("email")):
+        if acc["status"] in (STATUS_ACTIVE, STATUS_AUTH_PENDING) or _is_main_account_email(acc.get("email")):
+            auth_file = _resolve_status_auth_file(acc, workspace_kind="team")
+            if auth_file:
+                try:
+                    auth_data = json.loads(read_text(Path(auth_file)))
+                    access_token = auth_data.get("access_token")
+                    if access_token:
+                        account_id = auth_data.get("account_id")
+                        if account_id:
+                            status, info = check_codex_quota(access_token, account_id=account_id)
+                        else:
+                            status, info = check_codex_quota(access_token)
+                        if status == "ok" and isinstance(info, dict):
+                            quota_cache[acc["email"]] = info
+                        elif status == "exhausted":
+                            quota_info = quota_result_quota_info(info)
+                            if quota_info:
+                                quota_cache[acc["email"]] = quota_info
+                except Exception:
+                    pass
+
+        if acc.get("personal_status") not in (STATUS_ACTIVE, STATUS_AUTH_PENDING):
             continue
 
-        auth_file = _resolve_status_auth_file(acc)
-        if not auth_file:
+        personal_auth_file = _resolve_status_auth_file(acc, workspace_kind="personal")
+        if not personal_auth_file:
             continue
 
         try:
-            auth_data = json.loads(read_text(Path(auth_file)))
+            auth_data = json.loads(read_text(Path(personal_auth_file)))
             access_token = auth_data.get("access_token")
             if access_token:
-                status, info = check_codex_quota(access_token)
+                account_id = auth_data.get("account_id")
+                if account_id:
+                    status, info = check_codex_quota(access_token, account_id=account_id)
+                else:
+                    status, info = check_codex_quota(access_token)
                 if status == "ok" and isinstance(info, dict):
-                    quota_cache[acc["email"]] = info
+                    personal_quota_cache[acc["email"]] = info
                 elif status == "exhausted":
                     quota_info = quota_result_quota_info(info)
                     if quota_info:
-                        quota_cache[acc["email"]] = quota_info
+                        personal_quota_cache[acc["email"]] = quota_info
         except Exception:
             pass
 
@@ -2017,6 +2109,7 @@ def get_status():
         "summary": summary,
         "personal_summary": personal_summary,
         "quota_cache": quota_cache,
+        "personal_quota_cache": personal_quota_cache,
     }
 
 

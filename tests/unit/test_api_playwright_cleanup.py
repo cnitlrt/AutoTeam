@@ -100,3 +100,23 @@ def test_get_team_members_stops_chatgpt_when_start_fails(monkeypatch):
     assert len(instances) == 1
     assert instances[0].stopped is True
     assert api._playwright_lock.locked() is False
+
+
+def test_chatgpt_screenshot_helper_falls_back_when_screenshot_path_is_file(tmp_path, monkeypatch):
+    bad_path = tmp_path / "screenshots"
+    bad_path.write_text("not-a-dir", encoding="utf-8")
+    fallback_dir = tmp_path / "fallback"
+    captured = []
+
+    class FakePage:
+        def screenshot(self, path, full_page=True):
+            captured.append((path, full_page))
+
+    monkeypatch.setattr(chatgpt_api, "SCREENSHOT_DIR", bad_path)
+    monkeypatch.setattr(chatgpt_api, "_SCREENSHOT_FALLBACK_DIR", fallback_dir)
+    monkeypatch.setattr(chatgpt_api, "_SCREENSHOT_DIR_WARNING_EMITTED", False)
+
+    chatgpt_api._save_screenshot(FakePage(), "demo.png")
+
+    assert captured == [(str(fallback_dir / "demo.png"), True)]
+    assert fallback_dir.is_dir()

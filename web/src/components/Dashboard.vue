@@ -60,6 +60,16 @@
               <td class="px-4 py-3 text-gray-400 text-xs">{{ quotaReset(acc, 'weekly') }}</td>
               <td class="px-4 py-3 text-right space-x-2">
                 <button
+                  v-if="!acc.is_main_account"
+                  @click="loginPersonalAccount(acc.email)"
+                  :disabled="personalLoginDisabled || actionEmail === acc.email"
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
+                  :class="personalLoginDisabled || actionEmail === acc.email
+                    ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+                    : 'bg-fuchsia-600/10 text-fuchsia-300 border-fuchsia-500/30 hover:bg-fuchsia-600/20'">
+                  {{ actionEmail === acc.email && actionType === 'login-personal' ? '登录中...' : (acc.personal_status ? '重登个人' : '登录个人') }}
+                </button>
+                <button
                   v-if="!acc.is_main_account && acc.status !== 'active'"
                   @click="loginAccount(acc.email)"
                   :disabled="actionDisabled || actionEmail === acc.email"
@@ -179,6 +189,7 @@ const copied = ref(false)
 const messageClass = ref('')
 const adminReady = computed(() => !!props.adminStatus?.configured)
 const actionDisabled = computed(() => !!props.runningTask || !adminReady.value)
+const personalLoginDisabled = computed(() => !!props.runningTask)
 
 const cards = computed(() => {
   if (!props.status) return []
@@ -321,6 +332,27 @@ async function loginAccount(email) {
     const result = await api.loginAccount(email)
     message.value = `已提交 ${email} 的登录任务: ${result.task_id}`
     messageClass.value = 'bg-blue-500/10 text-blue-400 border-blue-500/20'
+    emit('refresh')
+  } catch (e) {
+    message.value = e.message
+    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
+  } finally {
+    actionEmail.value = ''
+    actionType.value = ''
+    setTimeout(() => { message.value = '' }, 8000)
+  }
+}
+
+async function loginPersonalAccount(email) {
+  if (personalLoginDisabled.value) return
+
+  actionEmail.value = email
+  actionType.value = 'login-personal'
+  message.value = ''
+  try {
+    const result = await api.loginAccount(email, 'personal')
+    message.value = `已提交 ${email} 的个人账号登录任务: ${result.task_id}`
+    messageClass.value = 'bg-fuchsia-500/10 text-fuchsia-300 border-fuchsia-500/20'
     emit('refresh')
   } catch (e) {
     message.value = e.message

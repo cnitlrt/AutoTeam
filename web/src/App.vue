@@ -134,6 +134,14 @@
 
         <TeamMembers v-else-if="currentPage === 'team'" />
 
+        <PersonalAccounts
+          v-else-if="currentPage === 'personal'"
+          :status="status"
+          :loading="loading"
+          :running-task="busyTask"
+          @refresh="refresh"
+        />
+
         <PoolPage v-else-if="currentPage === 'pool'"
           :running-task="busyTask" :admin-status="adminStatus"
           @task-started="onTaskStarted" @refresh="refresh" />
@@ -162,6 +170,7 @@ import Sidebar from './components/Sidebar.vue'
 import Dashboard from './components/Dashboard.vue'
 import ConfigPage from './components/ConfigPage.vue'
 import TeamMembers from './components/TeamMembers.vue'
+import PersonalAccounts from './components/PersonalAccounts.vue'
 import PoolPage from './components/PoolPage.vue'
 import SyncPage from './components/SyncPage.vue'
 import TaskHistoryPage from './components/TaskHistoryPage.vue'

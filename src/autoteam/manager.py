@@ -360,30 +360,34 @@ def _login_codex_with_result(
     mail_client=None,
     max_attempts: int = 3,
     workspace_kind: str = TEAM_CONTEXT,
+    workspace_account_id: str = "",
 ) -> dict:
     max_attempts = max(1, int(max_attempts))
 
     def _single_attempt() -> dict:
         try:
-            result = login_codex_via_browser(
-                email,
-                password,
-                mail_client=mail_client,
-                return_result=True,
-                workspace_kind=workspace_kind,
-            )
-        except TypeError:
-            try:
-                result = login_codex_via_browser(email, password, mail_client=mail_client, return_result=True)
-            except TypeError:
-                bundle = login_codex_via_browser(email, password, mail_client=mail_client)
-                return {
-                    "ok": bool(bundle),
-                    "bundle": bundle,
-                    "error_type": None if bundle else "login_failed",
-                    "error_detail": None if bundle else "登录失败",
-                    "retryable": False if bundle else True,
-                }
+            compat_attempts = [
+                {"return_result": True, "workspace_kind": workspace_kind, "workspace_account_id": workspace_account_id},
+                {"return_result": True, "workspace_kind": workspace_kind},
+                {"return_result": True},
+                {"workspace_kind": workspace_kind},
+                {},
+            ]
+            result = None
+            for call_kwargs in compat_attempts:
+                try:
+                    filtered_kwargs = {k: v for k, v in call_kwargs.items() if v not in (None, "")}
+                    result = login_codex_via_browser(
+                        email,
+                        password,
+                        mail_client=mail_client,
+                        **filtered_kwargs,
+                    )
+                    break
+                except TypeError:
+                    continue
+            else:
+                raise TypeError("login_codex_via_browser 签名不兼容")
         except Exception as exc:
             return {
                 "ok": False,
@@ -486,6 +490,27 @@ def _team_quota_still_pending(acc: dict | None, *, now: float | None = None) -> 
     return bool(resets_at and current_ts < resets_at)
 
 
+def _personal_quota_resets_at(acc: dict | None) -> int:
+    acc = acc or {}
+    resets_at = get_context_value(acc, PERSONAL_CONTEXT, "quota_resets_at")
+    if resets_at:
+        try:
+            return int(resets_at)
+        except Exception:
+            pass
+    quota = get_context_value(acc, PERSONAL_CONTEXT, "last_quota") or {}
+    try:
+        return int(quota.get("primary_resets_at") or 0)
+    except Exception:
+        return 0
+
+
+def _personal_quota_still_pending(acc: dict | None, *, now: float | None = None) -> bool:
+    current_ts = time.time() if now is None else now
+    resets_at = _personal_quota_resets_at(acc)
+    return bool(resets_at and current_ts < resets_at)
+
+
 def _personal_quota_update_payload(status_str: str, info, *, now: float | None = None) -> dict:
     now_ts = time.time() if now is None else now
     if status_str == "ok" and isinstance(info, dict):
@@ -521,6 +546,7 @@ def _activate_personal_overflow(acc: dict, *, mail_client) -> bool:
         password,
         mail_client=mail_client,
         workspace_kind=PERSONAL_CONTEXT,
+        workspace_account_id=get_context_value(acc, PERSONAL_CONTEXT, "account_id", "") or "",
     )
     bundle = login_result.get("bundle")
     if not login_result.get("ok") or not bundle:
@@ -982,7 +1008,7 @@ def cmd_check(force_auth_repair=False):
         for a in accounts
         if not _is_main_account_email(a.get("email"))
         and a.get("status") == STATUS_STANDBY
-        and a.get("personal_status") == STATUS_ACTIVE
+        and a.get("personal_status") in {STATUS_ACTIVE, STATUS_AUTH_PENDING, STATUS_EXHAUSTED}
         and _team_quota_resets_at(a)
         and not _team_quota_still_pending(a)
     ]
@@ -997,6 +1023,100 @@ def cmd_check(force_auth_repair=False):
                 mail_client.login()
                 mail_clients[provider] = mail_client
             _try_restore_team_from_personal(acc, mail_client=mail_client)
+        accounts = load_accounts()
+
+    personal_candidates = [
+        a
+        for a in accounts
+        if not _is_main_account_email(a.get("email"))
+        and a.get("status") == STATUS_STANDBY
+        and a.get("personal_status") in {STATUS_ACTIVE, STATUS_AUTH_PENDING, STATUS_EXHAUSTED}
+        and _team_quota_still_pending(a)
+    ]
+    if personal_candidates:
+        logger.info("[检查] 维护 %d 个 Personal/free 账号状态...", len(personal_candidates))
+        personal_auth_repairs = []
+        personal_skipped_repairs = []
+
+        for acc in personal_candidates:
+            email = acc["email"]
+            personal_status = acc.get("personal_status")
+
+            if personal_status == STATUS_EXHAUSTED:
+                if _personal_quota_still_pending(acc):
+                    continue
+                skip_reason = _auth_repair_skip_reason(acc, context=PERSONAL_CONTEXT, force=force_auth_repair)
+                if skip_reason:
+                    personal_skipped_repairs.append((email, skip_reason))
+                else:
+                    logger.info("[Personal] %s Personal/free 重置时间已过，尝试恢复登录", email)
+                    personal_auth_repairs.append(acc)
+                continue
+
+            if not _has_auth_file(acc, context=PERSONAL_CONTEXT):
+                skip_reason = _auth_repair_skip_reason(acc, context=PERSONAL_CONTEXT, force=force_auth_repair)
+                if skip_reason:
+                    personal_skipped_repairs.append((email, skip_reason))
+                else:
+                    logger.info("[Personal] %s Personal/free 缺少认证文件，尝试重新登录", email)
+                    personal_auth_repairs.append(acc)
+                continue
+
+            status_str, info = _check_and_refresh(acc, context=PERSONAL_CONTEXT)
+            if status_str == "ok":
+                if isinstance(info, dict):
+                    p_remain = 100 - info.get("primary_pct", 0)
+                    p_reset = info.get("primary_resets_at", 0)
+                    p_time = time.strftime("%m-%d %H:%M", time.localtime(p_reset)) if p_reset else "?"
+                    update_account(email, **_personal_quota_update_payload(status_str, info))
+                    if p_remain < threshold:
+                        logger.warning(
+                            "[Personal] %s 5h剩余 %d%% < %d%%，标记为 exhausted (重置 %s)",
+                            email,
+                            p_remain,
+                            threshold,
+                            p_time,
+                        )
+                        update_account(email, personal_status=STATUS_EXHAUSTED)
+                    else:
+                        _auth_repair_reset(email, context=PERSONAL_CONTEXT)
+                        update_account(email, personal_status=STATUS_ACTIVE, personal_last_active_at=time.time())
+                        logger.info("[Personal] %s 额度可用 - 5h剩余: %d%% (重置 %s)", email, p_remain, p_time)
+                else:
+                    _auth_repair_reset(email, context=PERSONAL_CONTEXT)
+                    update_account(email, personal_status=STATUS_ACTIVE, personal_last_active_at=time.time())
+                    logger.info("[Personal] %s 额度可用", email)
+            elif status_str == "exhausted":
+                update_account(
+                    email, **_personal_quota_update_payload(status_str, info), personal_status=STATUS_EXHAUSTED
+                )
+                quota_info = quota_result_quota_info(info) or {}
+                p_remain = max(0, 100 - quota_info.get("primary_pct", 0))
+                logger.warning("[Personal] %s 额度已用完 - 5h剩余: %d%%", email, p_remain)
+            elif status_str in {"auth_error", "no_auth"}:
+                skip_reason = _auth_repair_skip_reason(acc, context=PERSONAL_CONTEXT, force=force_auth_repair)
+                if skip_reason:
+                    personal_skipped_repairs.append((email, skip_reason))
+                else:
+                    logger.warning("[Personal] %s 认证失效，需要重新登录 Personal/free", email)
+                    personal_auth_repairs.append(acc)
+
+        if personal_skipped_repairs:
+            logger.info("[检查] 跳过 %d 个 Personal/free 自动修复账号:", len(personal_skipped_repairs))
+            for email, reason in personal_skipped_repairs:
+                logger.info("[检查]   %s（%s）", email, reason)
+
+        if personal_auth_repairs:
+            logger.info("[检查] 重新登录 %d 个 Personal/free 账号...", len(personal_auth_repairs))
+            mail_clients = {}
+            for acc in personal_auth_repairs:
+                provider = get_account_mail_provider(acc)
+                mail_client = mail_clients.get(provider)
+                if mail_client is None:
+                    mail_client = _get_account_mail_client(acc)
+                    mail_client.login()
+                    mail_clients[provider] = mail_client
+                _activate_personal_overflow(acc, mail_client=mail_client)
         accounts = load_accounts()
 
     all_active = [a for a in accounts if a["status"] == STATUS_ACTIVE and not _is_main_account_email(a.get("email"))]

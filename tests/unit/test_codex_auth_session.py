@@ -113,15 +113,34 @@ class _FakeCollection:
 
 
 class _FakePage:
-    def __init__(self, *, url, body, elements=None):
+    def __init__(self, *, url, body, elements=None, goto_states=None):
         self.url = url
         self._body = body
         self._elements = elements or []
+        self._goto_states = goto_states or {}
+        self.goto_calls = []
 
     def locator(self, selector):
         if selector == "body":
             return _FakeCollection(text=self._body)
         return _FakeCollection(items=self._elements)
+
+    def goto(self, url, wait_until=None, timeout=None):
+        self.goto_calls.append((url, wait_until, timeout))
+        self.url = url
+        state = self._goto_states.get(url)
+        if state:
+            self.url = state.get("url", url)
+            self._body = state.get("body", self._body)
+            self._elements = state.get("elements", self._elements)
+
+
+class _FakeScreenshotPage:
+    def __init__(self):
+        self.paths = []
+
+    def screenshot(self, path, full_page=True):
+        self.paths.append((path, full_page))
 
 
 def test_workspace_selection_detection_ignores_otp_pages():
@@ -176,3 +195,58 @@ def test_team_workspace_selection_requires_exact_workspace_name():
 
     assert codex_auth._workspace_label_candidates(page) == [("Personal account", items[1])]
     assert codex_auth._select_workspace_target(page, workspace_kind="team", workspace_name="Idapro") is False
+
+
+def test_personal_workspace_session_can_force_open_workspace_page(monkeypatch):
+    personal = _FakeElement("Personal account")
+    team = _FakeElement("Idapro")
+    page = _FakePage(
+        url="https://chatgpt.com/",
+        body="Skip to content Chat history New chat",
+        goto_states={
+            "https://auth.openai.com/workspace": {
+                "url": "https://auth.openai.com/workspace",
+                "body": "Choose a workspace Workspace Idapro Personal account",
+                "elements": [team, personal],
+            }
+        },
+    )
+    monkeypatch.setattr(codex_auth, "_confirm_workspace_selection", lambda _page: False)
+
+    assert codex_auth._ensure_workspace_target_session(page, workspace_kind="personal", workspace_name="") is True
+    assert page.goto_calls[0][0] == "https://auth.openai.com/workspace"
+    assert personal.clicked is True
+    assert team.clicked is False
+
+
+def test_personal_workspace_session_force_open_returns_false_when_workspace_page_not_available(monkeypatch):
+    page = _FakePage(
+        url="https://chatgpt.com/",
+        body="Skip to content Chat history New chat",
+        goto_states={
+            "https://auth.openai.com/workspace": {
+                "url": "https://chatgpt.com/",
+                "body": "Skip to content Chat history New chat",
+                "elements": [],
+            }
+        },
+    )
+    monkeypatch.setattr(codex_auth, "_confirm_workspace_selection", lambda _page: False)
+
+    assert codex_auth._ensure_workspace_target_session(page, workspace_kind="personal", workspace_name="") is False
+
+
+def test_screenshot_falls_back_when_project_screenshot_path_is_file(tmp_path, monkeypatch):
+    bad_path = tmp_path / "screenshots"
+    bad_path.write_text("not-a-dir", encoding="utf-8")
+    fallback_dir = tmp_path / "fallback"
+    page = _FakeScreenshotPage()
+
+    monkeypatch.setattr(codex_auth, "SCREENSHOT_DIR", bad_path)
+    monkeypatch.setattr(codex_auth, "_SCREENSHOT_FALLBACK_DIR", fallback_dir)
+    monkeypatch.setattr(codex_auth, "_SCREENSHOT_DIR_WARNING_EMITTED", False)
+
+    codex_auth._screenshot(page, "demo.png")
+
+    assert page.paths[0][0] == str(fallback_dir / "demo.png")
+    assert fallback_dir.is_dir()

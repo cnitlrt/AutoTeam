@@ -103,6 +103,71 @@ def test_cmd_check_attempts_restore_from_personal_when_team_reset_time_passed(mo
     assert calls == [("user@example.com", "M")]
 
 
+def test_cmd_check_attempts_restore_from_personal_when_personal_exhausted_but_team_reset_passed(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        manager,
+        "load_accounts",
+        lambda: [
+            {
+                "email": "user@example.com",
+                "status": "standby",
+                "personal_status": "exhausted",
+                "quota_resets_at": 100,
+                "mail_provider": "cloudmail",
+            }
+        ],
+    )
+    monkeypatch.setattr(manager.time, "time", lambda: 200)
+    monkeypatch.setattr(manager, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(manager, "get_mail_domain", lambda: "@example.com")
+    monkeypatch.setattr(manager, "_get_account_mail_client", lambda _acc: type("M", (), {"login": lambda self: None})())
+    monkeypatch.setattr(
+        manager,
+        "_try_restore_team_from_personal",
+        lambda acc, *, mail_client: (
+            calls.append((acc["email"], acc["personal_status"], mail_client.__class__.__name__)) or True
+        ),
+    )
+
+    exhausted = manager.cmd_check()
+
+    assert exhausted == []
+    assert calls == [("user@example.com", "exhausted", "M")]
+
+
+def test_cmd_check_attempts_reactivate_personal_after_personal_reset(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        manager,
+        "load_accounts",
+        lambda: [
+            {
+                "email": "user@example.com",
+                "status": "standby",
+                "personal_status": "exhausted",
+                "quota_resets_at": 300,
+                "personal_quota_resets_at": 100,
+                "mail_provider": "cloudmail",
+            }
+        ],
+    )
+    monkeypatch.setattr(manager.time, "time", lambda: 200)
+    monkeypatch.setattr(manager, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(manager, "get_mail_domain", lambda: "@example.com")
+    monkeypatch.setattr(manager, "_get_account_mail_client", lambda _acc: type("M", (), {"login": lambda self: None})())
+    monkeypatch.setattr(
+        manager,
+        "_activate_personal_overflow",
+        lambda acc, *, mail_client: calls.append((acc["email"], mail_client.__class__.__name__)) or True,
+    )
+
+    exhausted = manager.cmd_check()
+
+    assert exhausted == []
+    assert calls == [("user@example.com", "M")]
+
+
 def test_api_status_includes_personal_summary(monkeypatch):
     monkeypatch.setattr(
         "autoteam.accounts.load_accounts",

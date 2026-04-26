@@ -55,7 +55,7 @@ export const api = {
   getActiveAccounts: () => request('GET', '/accounts/active'),
   getStandbyAccounts: () => request('GET', '/accounts/standby'),
   deleteAccount: (email) => request('DELETE', `/accounts/${encodeURIComponent(email)}`),
-  loginAccount: (email) => request('POST', '/accounts/login', { email }),
+  loginAccount: (email, workspaceKind = 'team') => request('POST', '/accounts/login', { email, workspace_kind: workspaceKind }),
   getCodexAuth: (email) => request('GET', `/accounts/${encodeURIComponent(email)}/codex-auth`),
   kickAccount: (email) => request('POST', `/accounts/${encodeURIComponent(email)}/kick`),
   getCpaFiles: () => request('GET', '/cpa/files'),

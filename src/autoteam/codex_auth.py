@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import secrets
+import tempfile
 import time
 import urllib.parse
 from pathlib import Path
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 SCREENSHOT_DIR = PROJECT_ROOT / "screenshots"
+_SCREENSHOT_FALLBACK_DIR = Path(tempfile.gettempdir()) / "autoteam-screenshots"
+_SCREENSHOT_DIR_WARNING_EMITTED = False
 
 # Codex OAuth 配置
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -87,8 +90,21 @@ def infer_workspace_kind(bundle: dict | None = None, *, fallback_name: str = "")
 
 
 def _screenshot(page, name):
-    SCREENSHOT_DIR.mkdir(exist_ok=True)
-    page.screenshot(path=str(SCREENSHOT_DIR / name), full_page=True)
+    global _SCREENSHOT_DIR_WARNING_EMITTED
+
+    target_dir = SCREENSHOT_DIR
+    try:
+        if target_dir.exists() and not target_dir.is_dir():
+            target_dir = _SCREENSHOT_FALLBACK_DIR
+            if not _SCREENSHOT_DIR_WARNING_EMITTED:
+                logger.warning("[Codex] 截图目录不是文件夹，改用临时目录: %s", target_dir)
+                _SCREENSHOT_DIR_WARNING_EMITTED = True
+        target_dir.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(target_dir / name), full_page=True)
+    except Exception as exc:
+        if not _SCREENSHOT_DIR_WARNING_EMITTED:
+            logger.warning("[Codex] 保存截图失败（已忽略）: %s", exc)
+            _SCREENSHOT_DIR_WARNING_EMITTED = True
 
 
 def _page_excerpt(page, limit=240):
@@ -444,7 +460,55 @@ def _select_workspace_target(page, *, workspace_kind: str, workspace_name: str =
     return True
 
 
-def login_codex_via_browser(email, password, mail_client=None, *, return_result=False, workspace_kind="team"):
+def _confirm_workspace_selection(page) -> bool:
+    try:
+        cont_btn = page.locator('button:has-text("继续"), button:has-text("Continue")').first
+        if cont_btn.is_visible(timeout=1500):
+            cont_btn.click()
+            time.sleep(2)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _ensure_workspace_target_session(page, *, workspace_kind: str, workspace_name: str = "") -> bool:
+    if _is_workspace_selection_page(page):
+        selected = _select_workspace_target(page, workspace_kind=workspace_kind, workspace_name=workspace_name)
+        if selected:
+            _confirm_workspace_selection(page)
+        return selected
+
+    # Personal 模式更容易被站点自动落到 Team，主动打开 workspace 选择页再强制切换一次。
+    if normalize_workspace_kind(workspace_kind) != WORKSPACE_KIND_PERSONAL:
+        return False
+
+    try:
+        logger.info("[Codex] 当前未出现 workspace 选择页，尝试主动打开 workspace 页...")
+        page.goto("https://auth.openai.com/workspace", wait_until="domcontentloaded", timeout=30000)
+        time.sleep(3)
+    except Exception as exc:
+        logger.warning("[Codex] 打开 workspace 页失败: %s", exc)
+        return False
+
+    if not _is_workspace_selection_page(page):
+        return False
+
+    selected = _select_workspace_target(page, workspace_kind=workspace_kind, workspace_name=workspace_name)
+    if selected:
+        _confirm_workspace_selection(page)
+    return selected
+
+
+def login_codex_via_browser(
+    email,
+    password,
+    mail_client=None,
+    *,
+    return_result=False,
+    workspace_kind="team",
+    workspace_account_id="",
+):
     """
     通过 Playwright 自动完成 Codex OAuth 登录。
     mail_client: CloudMailClient 实例，用于自动读取登录验证码。
@@ -457,7 +521,11 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
     state = secrets.token_urlsafe(16)
     _used_email_ids: set[int] = set()  # 记录已尝试过的邮件，避免重复提交同一封验证码邮件
 
-    chatgpt_account_id = get_chatgpt_account_id() if workspace_kind == WORKSPACE_KIND_TEAM else ""
+    chatgpt_account_id = (
+        str(workspace_account_id or "").strip()
+        if workspace_kind == WORKSPACE_KIND_PERSONAL
+        else get_chatgpt_account_id()
+    )
     workspace_name = get_chatgpt_workspace_name() if workspace_kind == WORKSPACE_KIND_TEAM else ""
 
     auth_url = _build_auth_url(code_challenge, state)
@@ -593,13 +661,13 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
         _screenshot(_page, "codex_00_chatgpt_login.png")
         logger.info("[Codex] ChatGPT 登录后 URL: %s", _page.url)
 
-        # 如果是 workspace 选择页面，选择 Team
+        # 对 Personal 模式额外尝试一次显式 workspace 切换，避免站点自动落回 Team
+        try:
+            if _ensure_workspace_target_session(_page, workspace_kind=workspace_kind, workspace_name=workspace_name):
+                logger.info("[Codex] 已确认 %s workspace 登录态", _workspace_target_label(workspace_kind))
+        except Exception:
+            pass
         if "workspace" in _page.url:
-            logger.info("[Codex] 检测到 workspace 选择页面...")
-            try:
-                _select_workspace_target(_page, workspace_kind=workspace_kind, workspace_name=workspace_name)
-            except Exception:
-                pass
             _screenshot(_page, "codex_00_after_workspace.png")
             logger.info("[Codex] 选择 workspace 后 URL: %s", _page.url)
 

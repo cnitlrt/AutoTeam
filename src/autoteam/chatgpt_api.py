@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import re
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -26,6 +27,8 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 BASE_DIR = PROJECT_ROOT
 SCREENSHOT_DIR = PROJECT_ROOT / "screenshots"
+_SCREENSHOT_FALLBACK_DIR = Path(tempfile.gettempdir()) / "autoteam-screenshots"
+_SCREENSHOT_DIR_WARNING_EMITTED = False
 
 _WORKSPACE_IGNORE_LABELS = {
     "choose a workspace",
@@ -38,6 +41,40 @@ _WORKSPACE_IGNORE_LABELS = {
     "使用条款",
     "隐私政策",
 }
+
+
+def _ensure_screenshot_dir() -> Path | None:
+    global _SCREENSHOT_DIR_WARNING_EMITTED
+
+    target_dir = SCREENSHOT_DIR
+    try:
+        if target_dir.exists() and not target_dir.is_dir():
+            target_dir = _SCREENSHOT_FALLBACK_DIR
+            if not _SCREENSHOT_DIR_WARNING_EMITTED:
+                logger.warning("[ChatGPT] 截图目录不是文件夹，改用临时目录: %s", target_dir)
+                _SCREENSHOT_DIR_WARNING_EMITTED = True
+        target_dir.mkdir(parents=True, exist_ok=True)
+        return target_dir
+    except Exception as exc:
+        if not _SCREENSHOT_DIR_WARNING_EMITTED:
+            logger.warning("[ChatGPT] 初始化截图目录失败（已忽略）: %s", exc)
+            _SCREENSHOT_DIR_WARNING_EMITTED = True
+        return None
+
+
+def _save_screenshot(page, name: str):
+    target_dir = _ensure_screenshot_dir()
+    if not target_dir:
+        return
+    try:
+        page.screenshot(path=str(target_dir / name), full_page=True)
+    except Exception as exc:
+        global _SCREENSHOT_DIR_WARNING_EMITTED
+        if not _SCREENSHOT_DIR_WARNING_EMITTED:
+            logger.warning("[ChatGPT] 保存截图失败（已忽略）: %s", exc)
+            _SCREENSHOT_DIR_WARNING_EMITTED = True
+
+
 _WORKSPACE_FALLBACK_LABELS = (
     "personal account",
     "personal",
@@ -159,7 +196,7 @@ class ChatGPTTeamAPI:
         return None
 
     def _launch_browser(self):
-        SCREENSHOT_DIR.mkdir(exist_ok=True)
+        _ensure_screenshot_dir()
         if self.playwright or self.browser or self.context or self.page:
             self.stop()
 
@@ -686,7 +723,7 @@ class ChatGPTTeamAPI:
 
         logger.info("[ChatGPT] 检测到 workspace 选择页，开始收集组织候选 | URL=%s", self.page.url)
         try:
-            self.page.screenshot(path=str(SCREENSHOT_DIR / "admin_login_workspace_before_select.png"), full_page=True)
+            _save_screenshot(self.page, "admin_login_workspace_before_select.png")
         except Exception:
             pass
 
@@ -1047,7 +1084,7 @@ class ChatGPTTeamAPI:
         email_input = self._visible_locator_in_frames(self.EMAIL_INPUT_SELECTORS, timeout_ms=15000)
         if not email_input:
             try:
-                self.page.screenshot(path=str(SCREENSHOT_DIR / "admin_login_missing_email.png"), full_page=True)
+                _save_screenshot(self.page, "admin_login_missing_email.png")
             except Exception:
                 pass
             body_excerpt = ""
@@ -1166,7 +1203,7 @@ class ChatGPTTeamAPI:
                 code_input = None
         if not code_input:
             try:
-                self.page.screenshot(path=str(SCREENSHOT_DIR / "admin_login_code_not_found.png"), full_page=True)
+                _save_screenshot(self.page, "admin_login_code_not_found.png")
             except Exception:
                 pass
             logger.error("[ChatGPT] 找不到%s验证码输入框 | URL=%s", actor_label, self.page.url)
@@ -1174,7 +1211,7 @@ class ChatGPTTeamAPI:
 
         logger.info("[ChatGPT] 提交%s验证码前 | URL=%s | code_len=%d", actor_label, self.page.url, len(code))
         try:
-            self.page.screenshot(path=str(SCREENSHOT_DIR / "admin_login_code_before_submit.png"), full_page=True)
+            _save_screenshot(self.page, "admin_login_code_before_submit.png")
         except Exception:
             pass
         code_input.fill(code)
@@ -1182,7 +1219,7 @@ class ChatGPTTeamAPI:
         self._click_auth_button(code_input, ["Continue", "继续", "Verify"])
         time.sleep(8)
         try:
-            self.page.screenshot(path=str(SCREENSHOT_DIR / "admin_login_code_after_submit.png"), full_page=True)
+            _save_screenshot(self.page, "admin_login_code_after_submit.png")
         except Exception:
             pass
         self._log_login_state(f"{actor_label}验证码提交后")
