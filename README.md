@@ -80,6 +80,7 @@ docker compose up -d
 - **新建账号**：使用当前 `MAIL_PROVIDER`
 - **复用旧账号**：按账号自身保存的 `mail_provider`
 - **远端同步**：可启用 **CPA**、**Sub2API**，也可同时启用
+- **Sub2API 默认账号设置**：可在配置面板里统一管理新建账号的并发、优先级、倍率、白名单、WS / passthrough
 - **代理配置**：低频项，建议按需填写
 
 ## 文档

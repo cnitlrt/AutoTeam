@@ -81,14 +81,22 @@ class SetupConfig(BaseModel):
     CF_TEMP_EMAIL_BASE_URL: str = ""
     CF_TEMP_EMAIL_ADMIN_PASSWORD: str = ""
     CF_TEMP_EMAIL_DOMAIN: str = ""
-    SYNC_TARGET_CPA: str = ""
+    SYNC_TARGET_CPA: str | bool = ""
     CPA_URL: str = "http://127.0.0.1:8317"
     CPA_KEY: str = ""
-    SYNC_TARGET_SUB2API: str = ""
+    SYNC_TARGET_SUB2API: str | bool = ""
     SUB2API_URL: str = ""
     SUB2API_EMAIL: str = ""
     SUB2API_PASSWORD: str = ""
     SUB2API_GROUP: str = ""
+    SUB2API_CONCURRENCY: str | int = "10"
+    SUB2API_PRIORITY: str | int = "1"
+    SUB2API_RATE_MULTIPLIER: str | int | float = "1"
+    SUB2API_AUTO_PAUSE_ON_EXPIRED: str | bool = "true"
+    SUB2API_MODEL_WHITELIST: str = ""
+    SUB2API_OPENAI_WS_MODE: str = "off"
+    SUB2API_OPENAI_PASSTHROUGH: str | bool = "false"
+    SUB2API_OVERWRITE_ACCOUNT_SETTINGS: str | bool = "false"
     PLAYWRIGHT_PROXY_URL: str = ""
     PLAYWRIGHT_PROXY_BYPASS: str = ""
     API_KEY: str = ""
@@ -99,6 +107,8 @@ class SourceConfig(BaseModel):
 
 
 _RUNTIME_CONFIG_CLEARABLE_FIELDS = {
+    "SUB2API_GROUP",
+    "SUB2API_MODEL_WHITELIST",
     "PLAYWRIGHT_PROXY_URL",
     "PLAYWRIGHT_PROXY_BYPASS",
 }
@@ -131,6 +141,14 @@ _ALL_RUNTIME_ENV_KEYS = [
     "SUB2API_EMAIL",
     "SUB2API_PASSWORD",
     "SUB2API_GROUP",
+    "SUB2API_CONCURRENCY",
+    "SUB2API_PRIORITY",
+    "SUB2API_RATE_MULTIPLIER",
+    "SUB2API_AUTO_PAUSE_ON_EXPIRED",
+    "SUB2API_MODEL_WHITELIST",
+    "SUB2API_OPENAI_WS_MODE",
+    "SUB2API_OPENAI_PASSTHROUGH",
+    "SUB2API_OVERWRITE_ACCOUNT_SETTINGS",
     "EMAIL_POLL_INTERVAL",
     "EMAIL_POLL_TIMEOUT",
     "API_KEY",
@@ -443,6 +461,88 @@ def _validate_runtime_required_values(values: dict[str, str]):
     ]
 
 
+def _parse_bool_text(value: object, *, default: bool | None = None) -> bool | None:
+    if value is None:
+        return default
+    text = str(value).strip()
+    if not text:
+        return default
+    lowered = text.lower()
+    if lowered in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if lowered in {"0", "false", "no", "off", "disabled"}:
+        return False
+    raise ValueError(f"无效布尔值: {value}")
+
+
+def _validate_runtime_optional_values(values: dict[str, str]):
+    normalized = dict(values)
+
+    def _normalize_positive_int(key: str):
+        raw = str(normalized.get(key, "") or "").strip()
+        if not raw:
+            return
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ValueError(f"{key} 必须是正整数") from exc
+        if value <= 0:
+            raise ValueError(f"{key} 必须是正整数")
+        normalized[key] = str(value)
+
+    def _normalize_int(key: str):
+        raw = str(normalized.get(key, "") or "").strip()
+        if not raw:
+            return
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ValueError(f"{key} 必须是整数") from exc
+        normalized[key] = str(value)
+
+    def _normalize_positive_float(key: str):
+        raw = str(normalized.get(key, "") or "").strip()
+        if not raw:
+            return
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ValueError(f"{key} 必须是大于 0 的数字") from exc
+        if value <= 0:
+            raise ValueError(f"{key} 必须是大于 0 的数字")
+        normalized[key] = format(value, "g")
+
+    def _normalize_bool(key: str):
+        try:
+            value = _parse_bool_text(normalized.get(key, ""), default=None)
+        except ValueError as exc:
+            raise ValueError(f"{key} 必须是 true 或 false") from exc
+        if value is None:
+            return
+        normalized[key] = "true" if value else "false"
+
+    _normalize_positive_int("SUB2API_CONCURRENCY")
+    _normalize_int("SUB2API_PRIORITY")
+    _normalize_positive_float("SUB2API_RATE_MULTIPLIER")
+    _normalize_bool("SUB2API_AUTO_PAUSE_ON_EXPIRED")
+    _normalize_bool("SUB2API_OPENAI_PASSTHROUGH")
+    _normalize_bool("SUB2API_OVERWRITE_ACCOUNT_SETTINGS")
+
+    ws_mode = str(normalized.get("SUB2API_OPENAI_WS_MODE", "") or "").strip().lower()
+    if ws_mode:
+        if ws_mode not in {"off", "ctx_pool", "passthrough"}:
+            raise ValueError("SUB2API_OPENAI_WS_MODE 必须是 off、ctx_pool 或 passthrough")
+        normalized["SUB2API_OPENAI_WS_MODE"] = ws_mode
+
+    whitelist = str(normalized.get("SUB2API_MODEL_WHITELIST", "") or "").strip()
+    if whitelist:
+        normalized["SUB2API_MODEL_WHITELIST"] = ",".join(part.strip() for part in whitelist.split(",") if part.strip())
+    else:
+        normalized["SUB2API_MODEL_WHITELIST"] = ""
+
+    return normalized
+
+
 def _sync_runtime_globals():
     global API_KEY
 
@@ -565,6 +665,11 @@ def _save_runtime_config(data: dict[str, str]):
             content={"message": "缺少必填项: " + "、".join(missing)},
         )
 
+    try:
+        merged = _validate_runtime_optional_values(merged)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"message": str(exc)})
+
     previous_env = {key: os.environ.get(key) for key in env_keys}
     try:
         for key, value in merged.items():
@@ -648,6 +753,14 @@ def put_runtime_config_source(config: SourceConfig):
             _restore_runtime_env(previous_env)
             _reload_runtime_config_modules()
             return JSONResponse(status_code=400, content={"message": "缺少必填项: " + "、".join(missing)})
+
+        try:
+            loaded_values = _validate_runtime_optional_values(loaded_values)
+        except ValueError as exc:
+            _restore_runtime_source_text(previous_exists, previous_content)
+            _restore_runtime_env(previous_env)
+            _reload_runtime_config_modules()
+            return JSONResponse(status_code=400, content={"message": str(exc)})
 
         for key in env_keys:
             if loaded_values.get(key):

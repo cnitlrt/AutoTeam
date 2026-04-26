@@ -34,7 +34,6 @@ def test_build_credentials_matches_openai_oauth_shape():
             "refresh_token": "rt-1",
             "id_token": id_token,
             "expired": expires_iso,
-            "model_mapping": {"gpt-5.4": "gpt-5.4"},
         }
     )
 
@@ -50,8 +49,44 @@ def test_build_credentials_matches_openai_oauth_shape():
         "organization_id": "org-1",
         "plan_type": "team",
         "subscription_expires_at": "2026-05-05T15:55:38+00:00",
-        "model_mapping": {"gpt-5.4": "gpt-5.4"},
     }
+
+
+def test_build_managed_model_mapping_uses_identity_mapping():
+    assert sub2api_sync._build_managed_model_mapping("gpt-5.4, gpt-5.4-mini") == {
+        "gpt-5.4": "gpt-5.4",
+        "gpt-5.4-mini": "gpt-5.4-mini",
+    }
+
+
+def test_build_managed_model_mapping_returns_none_when_blank():
+    assert sub2api_sync._build_managed_model_mapping("") is None
+
+
+def test_apply_managed_extra_settings_supports_ws_mode_and_passthrough(monkeypatch):
+    monkeypatch.setattr(sub2api_sync, "SUB2API_OPENAI_WS_MODE", "ctx_pool")
+    monkeypatch.setattr(sub2api_sync, "SUB2API_OPENAI_PASSTHROUGH", True)
+
+    extra = {"openai_oauth_passthrough": False}
+    sub2api_sync._apply_managed_extra_settings(extra)
+
+    assert extra["openai_oauth_responses_websockets_v2_mode"] == "ctx_pool"
+    assert extra["openai_oauth_responses_websockets_v2_enabled"] is True
+    assert extra["openai_passthrough"] is True
+    assert extra["openai_oauth_passthrough"] is False
+
+
+def test_apply_managed_extra_settings_removes_passthrough_when_disabled(monkeypatch):
+    monkeypatch.setattr(sub2api_sync, "SUB2API_OPENAI_WS_MODE", "off")
+    monkeypatch.setattr(sub2api_sync, "SUB2API_OPENAI_PASSTHROUGH", False)
+
+    extra = {"openai_passthrough": True, "openai_oauth_passthrough": True}
+    sub2api_sync._apply_managed_extra_settings(extra)
+
+    assert extra["openai_oauth_responses_websockets_v2_mode"] == "off"
+    assert extra["openai_oauth_responses_websockets_v2_enabled"] is False
+    assert "openai_passthrough" not in extra
+    assert "openai_oauth_passthrough" not in extra
 
 
 def test_build_extra_includes_codex_usage_snapshot(monkeypatch):
@@ -133,3 +168,202 @@ def test_remote_auth_file_candidates_include_legacy_and_prefixed_names():
         "codex-a.json",
         "sub2api-codex-a.json",
     }
+
+
+def test_sync_to_sub2api_preserves_existing_manual_settings_when_overwrite_disabled(monkeypatch, tmp_path):
+    monkeypatch.setattr(sub2api_sync, "SUB2API_OVERWRITE_ACCOUNT_SETTINGS", False)
+    monkeypatch.setattr(sub2api_sync, "_login", lambda: "token")
+    monkeypatch.setattr(sub2api_sync, "_resolve_group_binding", lambda token: ([7], ["Team Pool"]))
+    monkeypatch.setattr(sub2api_sync, "_list_openai_oauth_accounts", lambda token: [])
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_dedupe_managed_accounts",
+        lambda token, items, *, kind: (
+            {
+                "tmp@example.com": {
+                    "id": 12,
+                    "status": "disabled",
+                    "credentials": {"model_mapping": {"manual-model": "manual-model"}},
+                    "extra": {
+                        "openai_oauth_responses_websockets_v2_mode": "passthrough",
+                        "openai_oauth_responses_websockets_v2_enabled": True,
+                        "openai_passthrough": True,
+                    },
+                    "group_ids": [99, 21],
+                }
+            },
+            0,
+        ),
+    )
+
+    auth_path = tmp_path / "codex-tmp@example.com-team-123.json"
+    auth_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {
+                "email": "tmp@example.com",
+                "status": "active",
+                "auth_file": str(auth_path),
+                "last_quota": {"primary_pct": 10, "weekly_pct": 20},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_load_auth_data",
+        lambda path: {
+            "email": "tmp@example.com",
+            "access_token": "at-1",
+            "refresh_token": "rt-1",
+        },
+    )
+
+    captured = {}
+
+    def fake_update_account(token, account, **kwargs):
+        captured.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(sub2api_sync, "_update_account", fake_update_account)
+
+    sub2api_sync.sync_to_sub2api()
+
+    assert captured["credentials"]["model_mapping"] == {"manual-model": "manual-model"}
+    assert captured["extra"]["openai_oauth_responses_websockets_v2_mode"] == "passthrough"
+    assert captured["extra"]["openai_oauth_responses_websockets_v2_enabled"] is True
+    assert captured["extra"]["openai_passthrough"] is True
+    assert captured["account_settings"] is None
+
+
+def test_sync_to_sub2api_overwrites_managed_settings_when_enabled(monkeypatch, tmp_path):
+    monkeypatch.setattr(sub2api_sync, "SUB2API_OVERWRITE_ACCOUNT_SETTINGS", True)
+    monkeypatch.setattr(sub2api_sync, "SUB2API_CONCURRENCY", 12)
+    monkeypatch.setattr(sub2api_sync, "SUB2API_PRIORITY", 3)
+    monkeypatch.setattr(sub2api_sync, "SUB2API_RATE_MULTIPLIER", 1.5)
+    monkeypatch.setattr(sub2api_sync, "SUB2API_AUTO_PAUSE_ON_EXPIRED", False)
+    monkeypatch.setattr(sub2api_sync, "SUB2API_OPENAI_WS_MODE", "ctx_pool")
+    monkeypatch.setattr(sub2api_sync, "SUB2API_OPENAI_PASSTHROUGH", False)
+    monkeypatch.setattr(sub2api_sync, "SUB2API_MODEL_WHITELIST", "gpt-5.4,gpt-5.4-mini")
+    monkeypatch.setattr(sub2api_sync, "_login", lambda: "token")
+    monkeypatch.setattr(sub2api_sync, "_resolve_group_binding", lambda token: ([], []))
+    monkeypatch.setattr(sub2api_sync, "_list_openai_oauth_accounts", lambda token: [])
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_dedupe_managed_accounts",
+        lambda token, items, *, kind: (
+            {
+                "tmp@example.com": {
+                    "id": 12,
+                    "status": "disabled",
+                    "credentials": {"model_mapping": {"manual-model": "manual-model"}},
+                    "extra": {
+                        "openai_oauth_responses_websockets_v2_mode": "off",
+                        "openai_oauth_responses_websockets_v2_enabled": False,
+                        "openai_passthrough": True,
+                        "openai_oauth_passthrough": True,
+                    },
+                    "group_ids": [],
+                }
+            },
+            0,
+        ),
+    )
+
+    auth_path = tmp_path / "codex-tmp@example.com-team-123.json"
+    auth_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {
+                "email": "tmp@example.com",
+                "status": "active",
+                "auth_file": str(auth_path),
+                "last_quota": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_load_auth_data",
+        lambda path: {
+            "email": "tmp@example.com",
+            "access_token": "at-1",
+            "refresh_token": "rt-1",
+        },
+    )
+
+    captured = {}
+
+    def fake_update_account(token, account, **kwargs):
+        captured.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(sub2api_sync, "_update_account", fake_update_account)
+
+    sub2api_sync.sync_to_sub2api()
+
+    assert captured["account_settings"] == {
+        "concurrency": 12,
+        "priority": 3,
+        "rate_multiplier": 1.5,
+        "auto_pause_on_expired": False,
+    }
+    assert captured["credentials"]["model_mapping"] == {
+        "gpt-5.4": "gpt-5.4",
+        "gpt-5.4-mini": "gpt-5.4-mini",
+    }
+    assert captured["extra"]["openai_oauth_responses_websockets_v2_mode"] == "ctx_pool"
+    assert captured["extra"]["openai_oauth_responses_websockets_v2_enabled"] is True
+    assert "openai_passthrough" not in captured["extra"]
+    assert "openai_oauth_passthrough" not in captured["extra"]
+
+
+def test_sync_main_codex_to_sub2api_creates_account_with_managed_defaults(monkeypatch, tmp_path):
+    monkeypatch.setattr(sub2api_sync, "SUB2API_CONCURRENCY", 8)
+    monkeypatch.setattr(sub2api_sync, "SUB2API_PRIORITY", 2)
+    monkeypatch.setattr(sub2api_sync, "SUB2API_RATE_MULTIPLIER", 2.5)
+    monkeypatch.setattr(sub2api_sync, "SUB2API_AUTO_PAUSE_ON_EXPIRED", True)
+    monkeypatch.setattr(sub2api_sync, "SUB2API_MODEL_WHITELIST", "gpt-5.4")
+    monkeypatch.setattr(sub2api_sync, "SUB2API_OPENAI_WS_MODE", "passthrough")
+    monkeypatch.setattr(sub2api_sync, "SUB2API_OPENAI_PASSTHROUGH", True)
+    monkeypatch.setattr(sub2api_sync, "_login", lambda: "token")
+    monkeypatch.setattr(sub2api_sync, "_resolve_group_binding", lambda token: ([7], ["Team Pool"]))
+    monkeypatch.setattr(sub2api_sync, "_list_openai_oauth_accounts", lambda token: [])
+    monkeypatch.setattr(sub2api_sync, "_dedupe_managed_accounts", lambda token, items, *, kind: ({}, 0))
+
+    auth_path = tmp_path / "main.json"
+    auth_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_load_auth_data",
+        lambda path: {
+            "email": "main@example.com",
+            "access_token": "at-1",
+            "refresh_token": "rt-1",
+        },
+    )
+
+    captured = {}
+
+    def fake_create_account(token, **kwargs):
+        captured.update(kwargs)
+        return {"id": 99}
+
+    monkeypatch.setattr(sub2api_sync, "_create_account", fake_create_account)
+
+    result = sub2api_sync.sync_main_codex_to_sub2api(str(auth_path))
+
+    assert result["account_id"] == 99
+    assert captured["account_settings"] == {
+        "concurrency": 8,
+        "priority": 2,
+        "rate_multiplier": 2.5,
+        "auto_pause_on_expired": True,
+    }
+    assert captured["credentials"]["model_mapping"] == {"gpt-5.4": "gpt-5.4"}
+    assert captured["extra"]["openai_oauth_responses_websockets_v2_mode"] == "passthrough"
+    assert captured["extra"]["openai_oauth_responses_websockets_v2_enabled"] is True
+    assert captured["extra"]["openai_passthrough"] is True

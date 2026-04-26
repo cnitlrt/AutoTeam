@@ -12,7 +12,20 @@ from pathlib import Path
 import requests
 
 from autoteam.codex_auth import CODEX_CLIENT_ID
-from autoteam.config import SUB2API_EMAIL, SUB2API_GROUP, SUB2API_PASSWORD, SUB2API_URL
+from autoteam.config import (
+    SUB2API_AUTO_PAUSE_ON_EXPIRED,
+    SUB2API_CONCURRENCY,
+    SUB2API_EMAIL,
+    SUB2API_GROUP,
+    SUB2API_MODEL_WHITELIST,
+    SUB2API_OPENAI_PASSTHROUGH,
+    SUB2API_OPENAI_WS_MODE,
+    SUB2API_OVERWRITE_ACCOUNT_SETTINGS,
+    SUB2API_PASSWORD,
+    SUB2API_PRIORITY,
+    SUB2API_RATE_MULTIPLIER,
+    SUB2API_URL,
+)
 from autoteam.textio import read_text
 
 logger = logging.getLogger(__name__)
@@ -32,9 +45,6 @@ _EXTRA_GROUP_NAMES = "autoteam_sub2api_group_names"
 _KIND_POOL = "pool"
 _KIND_MAIN = "main"
 
-_DEFAULT_CONCURRENCY = 10
-_DEFAULT_PRIORITY = 1
-_DEFAULT_RATE_MULTIPLIER = 1
 _REMOTE_AUTH_FILE_PREFIX = "sub2api-"
 
 
@@ -202,6 +212,56 @@ def _split_group_spec(value: str | None) -> list[str]:
         seen.add(lowered)
         parts.append(item)
     return parts
+
+
+def _split_csv_spec(value: str | None) -> list[str]:
+    text = str(value or "").replace("，", ",")
+    parts = []
+    seen = set()
+    for raw in text.replace("\n", ",").split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        lowered = item.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        parts.append(item)
+    return parts
+
+
+def _build_managed_model_mapping(model_whitelist: str | None = None) -> dict[str, str] | None:
+    models = _split_csv_spec(model_whitelist if model_whitelist is not None else SUB2API_MODEL_WHITELIST)
+    if not models:
+        return None
+    return {model: model for model in models}
+
+
+def _build_account_settings() -> dict:
+    return {
+        "concurrency": SUB2API_CONCURRENCY,
+        "priority": SUB2API_PRIORITY,
+        "rate_multiplier": SUB2API_RATE_MULTIPLIER,
+        "auto_pause_on_expired": SUB2API_AUTO_PAUSE_ON_EXPIRED,
+    }
+
+
+def _apply_managed_credentials_settings(credentials: dict, *, model_whitelist: str | None = None) -> dict:
+    model_mapping = _build_managed_model_mapping(model_whitelist)
+    if model_mapping:
+        credentials["model_mapping"] = model_mapping
+    return credentials
+
+
+def _apply_managed_extra_settings(extra: dict) -> dict:
+    extra["openai_oauth_responses_websockets_v2_mode"] = SUB2API_OPENAI_WS_MODE
+    extra["openai_oauth_responses_websockets_v2_enabled"] = SUB2API_OPENAI_WS_MODE != "off"
+    if SUB2API_OPENAI_PASSTHROUGH:
+        extra["openai_passthrough"] = True
+    else:
+        extra.pop("openai_passthrough", None)
+        extra.pop("openai_oauth_passthrough", None)
+    return extra
 
 
 def _dedupe_managed_accounts(token: str, items: list[dict], *, kind: str) -> tuple[dict[str, dict], int]:
@@ -456,10 +516,6 @@ def _build_credentials(auth_data: dict) -> dict:
     if subscription_expires_at:
         credentials["subscription_expires_at"] = subscription_expires_at
 
-    model_mapping = auth_data.get("model_mapping")
-    if isinstance(model_mapping, dict) and model_mapping:
-        credentials["model_mapping"] = model_mapping
-
     return credentials
 
 
@@ -528,7 +584,14 @@ def _merge_group_ids(account: dict, desired_group_ids: list[int] | None) -> list
 
 
 def _create_account(
-    token: str, *, name: str, credentials: dict, extra: dict, label: str, group_ids: list[int] | None = None
+    token: str,
+    *,
+    name: str,
+    credentials: dict,
+    extra: dict,
+    label: str,
+    group_ids: list[int] | None = None,
+    account_settings: dict | None = None,
 ) -> dict:
     payload = {
         "name": name,
@@ -536,12 +599,11 @@ def _create_account(
         "type": "oauth",
         "credentials": credentials,
         "extra": extra,
-        "concurrency": _DEFAULT_CONCURRENCY,
-        "priority": _DEFAULT_PRIORITY,
-        "rate_multiplier": _DEFAULT_RATE_MULTIPLIER,
-        "auto_pause_on_expired": True,
+        **_build_account_settings(),
         "group_ids": list(group_ids or []),
     }
+    if account_settings:
+        payload.update(account_settings)
     return _request(
         "POST",
         "/admin/accounts",
@@ -560,6 +622,7 @@ def _update_account(
     name: str | None = None,
     status: str | None = None,
     group_ids: list[int] | None = None,
+    account_settings: dict | None = None,
 ):
     payload = {"credentials": credentials, "extra": extra}
     if name:
@@ -568,6 +631,8 @@ def _update_account(
         payload["status"] = status
     if group_ids is not None:
         payload["group_ids"] = list(group_ids)
+    if account_settings:
+        payload.update(account_settings)
     return _request(
         "PUT",
         f"/admin/accounts/{account['id']}",
@@ -655,6 +720,7 @@ def sync_to_sub2api():
     created = 0
     updated = 0
     deleted = 0
+    overwrite_account_settings = SUB2API_OVERWRITE_ACCOUNT_SETTINGS
 
     for email, target in active_targets.items():
         desired_credentials = _build_credentials(target["auth_data"])
@@ -672,6 +738,11 @@ def sync_to_sub2api():
             merged_credentials.update(desired_credentials)
             merged_extra = dict(existing.get("extra") or {})
             merged_extra.update(desired_extra)
+            account_settings = None
+            if overwrite_account_settings:
+                account_settings = _build_account_settings()
+                _apply_managed_credentials_settings(merged_credentials)
+                _apply_managed_extra_settings(merged_extra)
             _update_account(
                 token,
                 existing,
@@ -679,11 +750,14 @@ def sync_to_sub2api():
                 extra=merged_extra,
                 status="active" if existing.get("status") != "active" else None,
                 group_ids=_merge_group_ids(existing, group_ids),
+                account_settings=account_settings,
             )
             logger.info("[Sub2API] 更新: %s", email)
             updated += 1
             continue
 
+        _apply_managed_credentials_settings(desired_credentials)
+        _apply_managed_extra_settings(desired_extra)
         _create_account(
             token,
             name=target["name"],
@@ -691,6 +765,7 @@ def sync_to_sub2api():
             extra=desired_extra,
             label=f"创建账号 {email}",
             group_ids=group_ids,
+            account_settings=_build_account_settings(),
         )
         logger.info("[Sub2API] 创建: %s", email)
         created += 1
@@ -735,6 +810,7 @@ def sync_main_codex_to_sub2api(filepath):
     desired_extra = _build_extra(email, auth_path.name, kind=_KIND_MAIN)
     _attach_group_metadata(desired_extra, group_ids, group_names)
     name = f"AutoTeam Main | {email}" if email else "AutoTeam Main"
+    overwrite_account_settings = SUB2API_OVERWRITE_ACCOUNT_SETTINGS
 
     current = existing_by_email.get(email) if email else None
     if current:
@@ -742,6 +818,11 @@ def sync_main_codex_to_sub2api(filepath):
         merged_credentials.update(desired_credentials)
         merged_extra = dict(current.get("extra") or {})
         merged_extra.update(desired_extra)
+        account_settings = None
+        if overwrite_account_settings:
+            account_settings = _build_account_settings()
+            _apply_managed_credentials_settings(merged_credentials)
+            _apply_managed_extra_settings(merged_extra)
         _update_account(
             token,
             current,
@@ -750,9 +831,12 @@ def sync_main_codex_to_sub2api(filepath):
             name=name,
             status="active",
             group_ids=_merge_group_ids(current, group_ids),
+            account_settings=account_settings,
         )
         account_id = current.get("id")
     else:
+        _apply_managed_credentials_settings(desired_credentials)
+        _apply_managed_extra_settings(desired_extra)
         created = _create_account(
             token,
             name=name,
@@ -760,6 +844,7 @@ def sync_main_codex_to_sub2api(filepath):
             extra=desired_extra,
             label="创建主号账号",
             group_ids=group_ids,
+            account_settings=_build_account_settings(),
         )
         account_id = created.get("id") if isinstance(created, dict) else None
 

@@ -159,6 +159,9 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
                 "CLOUDMAIL_DOMAIN=@example.com",
                 "CPA_URL=http://127.0.0.1:8317",
                 "CPA_KEY=key-1",
+                "SUB2API_CONCURRENCY=12",
+                "SUB2API_OPENAI_WS_MODE=ctx_pool",
+                "SUB2API_OPENAI_PASSTHROUGH=true",
                 "PLAYWRIGHT_PROXY_URL=socks5://127.0.0.1:1080",
                 "PLAYWRIGHT_PROXY_BYPASS=localhost,127.0.0.1",
                 "API_KEY=runtime-key",
@@ -175,6 +178,9 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
         "CLOUDMAIL_DOMAIN",
         "CPA_URL",
         "CPA_KEY",
+        "SUB2API_CONCURRENCY",
+        "SUB2API_OPENAI_WS_MODE",
+        "SUB2API_OPENAI_PASSTHROUGH",
         "PLAYWRIGHT_PROXY_URL",
         "PLAYWRIGHT_PROXY_BYPASS",
         "API_KEY",
@@ -189,6 +195,10 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
     assert fields["CLOUDMAIL_EMAIL"]["runtime_required"] is True
     assert fields["CPA_KEY"]["value"] == "key-1"
     assert fields["CPA_KEY"]["runtime_required"] is True
+    assert fields["SUB2API_CONCURRENCY"]["value"] == "12"
+    assert fields["SUB2API_CONCURRENCY"]["runtime_required"] is False
+    assert fields["SUB2API_OPENAI_WS_MODE"]["value"] == "ctx_pool"
+    assert fields["SUB2API_OPENAI_PASSTHROUGH"]["value"] == "true"
     assert fields["PLAYWRIGHT_PROXY_URL"]["value"] == "socks5://127.0.0.1:1080"
     assert fields["PLAYWRIGHT_PROXY_URL"]["runtime_required"] is False
     assert fields["PLAYWRIGHT_PROXY_BYPASS"]["value"] == "localhost,127.0.0.1"
@@ -280,6 +290,67 @@ def test_put_runtime_config_allows_partial_runtime_fields_when_api_key_exists(mo
     assert result["message"] == "配置保存成功"
     assert written["API_KEY"] == "old-key"
     assert "CPA_URL" not in written
+
+
+def test_put_runtime_config_accepts_numeric_sub2api_fields(monkeypatch):
+    written = {}
+
+    def fake_write_env(key, value):
+        written[key] = value
+
+    monkeypatch.setattr("autoteam.setup_wizard._write_env", fake_write_env)
+    monkeypatch.setattr(
+        "autoteam.setup_wizard._verify_mail_provider",
+        lambda provider=None: (_ for _ in ()).throw(AssertionError("mail provider verify should not run")),
+    )
+    monkeypatch.setattr(
+        "autoteam.setup_wizard._verify_cpa",
+        lambda: (_ for _ in ()).throw(AssertionError("cpa verify should not run")),
+    )
+    monkeypatch.setattr("importlib.reload", lambda module: module)
+    monkeypatch.setattr(api, "API_KEY", "old-key")
+    monkeypatch.setenv("API_KEY", "old-key")
+
+    result = api.put_runtime_config(
+        api.SetupConfig(
+            API_KEY="old-key",
+            SUB2API_CONCURRENCY=15,
+            SUB2API_PRIORITY=2,
+            SUB2API_RATE_MULTIPLIER=1.5,
+            SUB2API_AUTO_PAUSE_ON_EXPIRED=True,
+            SUB2API_OPENAI_PASSTHROUGH=False,
+            SUB2API_OVERWRITE_ACCOUNT_SETTINGS=True,
+        )
+    )
+
+    assert result["message"] == "配置保存成功"
+    assert written["SUB2API_CONCURRENCY"] == "15"
+    assert written["SUB2API_PRIORITY"] == "2"
+    assert written["SUB2API_RATE_MULTIPLIER"] == "1.5"
+    assert written["SUB2API_AUTO_PAUSE_ON_EXPIRED"] == "true"
+    assert written["SUB2API_OPENAI_PASSTHROUGH"] == "false"
+    assert written["SUB2API_OVERWRITE_ACCOUNT_SETTINGS"] == "true"
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"SUB2API_CONCURRENCY": "0"}, "SUB2API_CONCURRENCY 必须是正整数"),
+        ({"SUB2API_RATE_MULTIPLIER": "0"}, "SUB2API_RATE_MULTIPLIER 必须是大于 0 的数字"),
+        ({"SUB2API_AUTO_PAUSE_ON_EXPIRED": "maybe"}, "SUB2API_AUTO_PAUSE_ON_EXPIRED 必须是 true 或 false"),
+        ({"SUB2API_OPENAI_WS_MODE": "socket"}, "SUB2API_OPENAI_WS_MODE 必须是 off、ctx_pool 或 passthrough"),
+    ],
+)
+def test_put_runtime_config_rejects_invalid_sub2api_default_settings(monkeypatch, payload, message):
+    monkeypatch.setattr("autoteam.setup_wizard._write_env", lambda key, value: None)
+    monkeypatch.setattr("importlib.reload", lambda module: module)
+    monkeypatch.setattr(api, "API_KEY", "old-key")
+    monkeypatch.setenv("API_KEY", "old-key")
+
+    result = api.put_runtime_config(api.SetupConfig(API_KEY="old-key", **payload))
+
+    assert result.status_code == 400
+    assert json.loads(result.body.decode("utf-8"))["message"] == message
 
 
 def test_get_runtime_config_source_returns_env_content(tmp_path, monkeypatch):

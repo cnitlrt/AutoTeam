@@ -243,14 +243,62 @@
             </div>
           </div>
           <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <div v-for="field in syncSub2apiFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+            <div v-for="field in syncSub2apiConnectionFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
               <label class="mb-2 block text-sm font-medium text-slate-300">
                 {{ field.prompt }}
                 <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
+                <div v-if="sub2apiFieldHint(field.key)" class="mt-1 font-mono text-[11px] font-normal text-slate-500 break-all">
+                  {{ sub2apiFieldHint(field.key) }}
+                </div>
               </label>
               <input
                 v-model="runtimeForm[field.key]"
                 :type="fieldInputType(field.key)"
+                :placeholder="field.default || ''"
+                class="input-dark"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div v-if="syncSub2apiEnabled" class="rounded-2xl border border-white/10 bg-white/5 p-5">
+          <div class="mb-4">
+            <div class="text-sm font-medium text-white">Sub2API 默认账号设置</div>
+            <div class="mt-1 text-xs leading-5 text-slate-400">
+              新创建的 Sub2API 账号会自动带上这些默认参数；已存在账号默认不覆盖，只有开启“覆盖账号设置”后才会在每次同步时强制统一。
+            </div>
+          </div>
+          <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div v-for="field in syncSub2apiDefaultFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+              <label class="mb-2 block text-sm font-medium text-slate-300">
+                {{ field.prompt }}
+                <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
+                <div v-if="sub2apiFieldHint(field.key)" class="mt-1 font-mono text-[11px] font-normal text-slate-500 break-all">
+                  {{ sub2apiFieldHint(field.key) }}
+                </div>
+              </label>
+              <select
+                v-if="isBooleanStringField(field.key)"
+                v-model="runtimeForm[field.key]"
+                class="input-dark"
+              >
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+              <select
+                v-else-if="isWsModeField(field.key)"
+                v-model="runtimeForm[field.key]"
+                class="input-dark"
+              >
+                <option value="off">off</option>
+                <option value="ctx_pool">ctx_pool</option>
+                <option value="passthrough">passthrough</option>
+              </select>
+              <input
+                v-else
+                v-model="runtimeForm[field.key]"
+                :type="fieldInputType(field.key)"
+                :step="fieldInputStep(field.key)"
                 :placeholder="field.default || ''"
                 class="input-dark"
               />
@@ -449,7 +497,24 @@ const emit = defineEmits(['refresh', 'admin-progress'])
 
 const runtimeCategoryKeys = {
   cloudmail: ['MAIL_PROVIDER', 'CLOUDMAIL_BASE_URL', 'CLOUDMAIL_EMAIL', 'CLOUDMAIL_PASSWORD', 'CLOUDMAIL_DOMAIN', 'CF_TEMP_EMAIL_BASE_URL', 'CF_TEMP_EMAIL_ADMIN_PASSWORD', 'CF_TEMP_EMAIL_DOMAIN'],
-  sync: ['SYNC_TARGET_CPA', 'SYNC_TARGET_SUB2API', 'CPA_URL', 'CPA_KEY', 'SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP'],
+  sync: [
+    'SYNC_TARGET_CPA',
+    'SYNC_TARGET_SUB2API',
+    'CPA_URL',
+    'CPA_KEY',
+    'SUB2API_URL',
+    'SUB2API_EMAIL',
+    'SUB2API_PASSWORD',
+    'SUB2API_GROUP',
+    'SUB2API_CONCURRENCY',
+    'SUB2API_PRIORITY',
+    'SUB2API_RATE_MULTIPLIER',
+    'SUB2API_AUTO_PAUSE_ON_EXPIRED',
+    'SUB2API_MODEL_WHITELIST',
+    'SUB2API_OPENAI_WS_MODE',
+    'SUB2API_OPENAI_PASSTHROUGH',
+    'SUB2API_OVERWRITE_ACCOUNT_SETTINGS',
+  ],
   proxy: ['PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS'],
   security: ['API_KEY'],
 }
@@ -516,12 +581,30 @@ const sourceLoaded = ref(false)
 const sourceMessage = ref('')
 const sourceMessageClass = ref('')
 const runtimeRequiredKeys = new Set(['API_KEY'])
+const sub2apiFieldHints = {
+  SUB2API_URL: 'ENV: SUB2API_URL · Sub2API API base URL',
+  SUB2API_EMAIL: 'ENV: SUB2API_EMAIL · login.email',
+  SUB2API_PASSWORD: 'ENV: SUB2API_PASSWORD · login.password',
+  SUB2API_GROUP: 'ENV: SUB2API_GROUP · group_ids',
+  SUB2API_CONCURRENCY: 'ENV: SUB2API_CONCURRENCY · account.concurrency',
+  SUB2API_PRIORITY: 'ENV: SUB2API_PRIORITY · account.priority',
+  SUB2API_RATE_MULTIPLIER: 'ENV: SUB2API_RATE_MULTIPLIER · account.rate_multiplier',
+  SUB2API_AUTO_PAUSE_ON_EXPIRED: 'ENV: SUB2API_AUTO_PAUSE_ON_EXPIRED · account.auto_pause_on_expired',
+  SUB2API_MODEL_WHITELIST: 'ENV: SUB2API_MODEL_WHITELIST · credentials.model_mapping',
+  SUB2API_OPENAI_WS_MODE: 'ENV: SUB2API_OPENAI_WS_MODE · extra.openai_oauth_responses_websockets_v2_mode / enabled',
+  SUB2API_OPENAI_PASSTHROUGH: 'ENV: SUB2API_OPENAI_PASSTHROUGH · extra.openai_passthrough',
+  SUB2API_OVERWRITE_ACCOUNT_SETTINGS: 'ENV: SUB2API_OVERWRITE_ACCOUNT_SETTINGS · AutoTeam overwrite switch',
+}
 
 const selectedRuntimeCategory = computed(() => runtimeCategoryKeys[visualCategory.value] ? visualCategory.value : '')
 const currentRuntimeCategoryMeta = computed(() => runtimeCategoryMeta[selectedRuntimeCategory.value] || null)
 
 function fieldByKey(key) {
   return runtimeFields.value.find(field => field.key === key) || null
+}
+
+function sub2apiFieldHint(key) {
+  return sub2apiFieldHints[key] || ''
 }
 
 function fieldsByKeys(keys) {
@@ -540,7 +623,21 @@ const cfTempEmailFields = computed(() => fieldsByKeys(['CF_TEMP_EMAIL_BASE_URL',
 const syncCpaEnabled = computed(() => String(runtimeForm.SYNC_TARGET_CPA || '').toLowerCase() === 'true')
 const syncSub2apiEnabled = computed(() => String(runtimeForm.SYNC_TARGET_SUB2API || '').toLowerCase() === 'true')
 const syncCpaFields = computed(() => syncCpaEnabled.value ? fieldsByKeys(['CPA_URL', 'CPA_KEY']) : [])
-const syncSub2apiFields = computed(() => syncSub2apiEnabled.value ? fieldsByKeys(['SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP']) : [])
+const syncSub2apiConnectionFields = computed(() => syncSub2apiEnabled.value
+  ? fieldsByKeys(['SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP'])
+  : [])
+const syncSub2apiDefaultFields = computed(() => syncSub2apiEnabled.value
+  ? fieldsByKeys([
+      'SUB2API_CONCURRENCY',
+      'SUB2API_PRIORITY',
+      'SUB2API_RATE_MULTIPLIER',
+      'SUB2API_AUTO_PAUSE_ON_EXPIRED',
+      'SUB2API_MODEL_WHITELIST',
+      'SUB2API_OPENAI_WS_MODE',
+      'SUB2API_OPENAI_PASSTHROUGH',
+      'SUB2API_OVERWRITE_ACCOUNT_SETTINGS',
+    ])
+  : [])
 
 const currentRuntimeFields = computed(() => {
   if (selectedRuntimeCategory.value === 'cloudmail') {
@@ -581,8 +678,8 @@ const currentRuntimeStatus = computed(() => {
       }
     }
 
-    const cpaReady = !syncCpaEnabled.value || syncCpaFields.value.every(field => field.configured)
-    const sub2apiReady = !syncSub2apiEnabled.value || syncSub2apiFields.value.every(field => field.configured)
+    const cpaReady = !syncCpaEnabled.value || syncCpaFields.value.every(field => !isRuntimeRequired(field) || field.configured)
+    const sub2apiReady = !syncSub2apiEnabled.value || syncSub2apiConnectionFields.value.every(field => !isRuntimeRequired(field) || field.configured)
 
     return cpaReady && sub2apiReady
       ? {
@@ -660,11 +757,36 @@ function setSourceMessage(text, type = 'success') {
 }
 
 function fieldInputType(key) {
+  if (['SUB2API_CONCURRENCY', 'SUB2API_PRIORITY', 'SUB2API_RATE_MULTIPLIER'].includes(key)) {
+    return 'number'
+  }
   return key.includes('PASSWORD') || key.includes('KEY') ? 'password' : 'text'
 }
 
 function isToggleField(key) {
   return key === 'SYNC_TARGET_CPA' || key === 'SYNC_TARGET_SUB2API'
+}
+
+function isBooleanStringField(key) {
+  return isToggleField(key) || [
+    'SUB2API_AUTO_PAUSE_ON_EXPIRED',
+    'SUB2API_OPENAI_PASSTHROUGH',
+    'SUB2API_OVERWRITE_ACCOUNT_SETTINGS',
+  ].includes(key)
+}
+
+function isWsModeField(key) {
+  return key === 'SUB2API_OPENAI_WS_MODE'
+}
+
+function fieldInputStep(key) {
+  if (key === 'SUB2API_RATE_MULTIPLIER') {
+    return '0.001'
+  }
+  if (key === 'SUB2API_CONCURRENCY' || key === 'SUB2API_PRIORITY') {
+    return '1'
+  }
+  return undefined
 }
 
 function isRuntimeRequired(field) {
@@ -673,8 +795,12 @@ function isRuntimeRequired(field) {
 
 function normalizeRuntimeFieldValue(field) {
   const value = field?.value ?? field?.default ?? ''
-  if (isToggleField(field?.key)) {
+  if (isBooleanStringField(field?.key)) {
     return String(value).toLowerCase() === 'true' ? 'true' : 'false'
+  }
+  if (isWsModeField(field?.key)) {
+    const mode = String(value || '').toLowerCase()
+    return ['off', 'ctx_pool', 'passthrough'].includes(mode) ? mode : 'off'
   }
   return value
 }
@@ -707,7 +833,8 @@ async function saveRuntimeConfig() {
   try {
     const payload = {}
     for (const field of runtimeFields.value) {
-      payload[field.key] = runtimeForm[field.key] ?? ''
+      const value = runtimeForm[field.key]
+      payload[field.key] = value == null ? '' : String(value)
     }
     const result = await api.saveRuntimeConfig(payload)
     if (result.api_key) {
