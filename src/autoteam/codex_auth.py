@@ -1247,7 +1247,12 @@ class SessionCodexAuthFlow:
         from autoteam.chatgpt_api import ChatGPTTeamAPI
 
         self.chatgpt = ChatGPTTeamAPI()
-        self.chatgpt.start_with_session(self.session_token, self.account_id, self.workspace_name)
+        self.chatgpt.start_with_session(
+            self.session_token,
+            self.account_id,
+            self.workspace_name,
+            require_browser=True,
+        )
         self.page = self.chatgpt.context.new_page()
         self._attach_callback_listeners()
         self._inject_auth_cookies()
