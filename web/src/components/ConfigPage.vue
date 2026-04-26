@@ -247,6 +247,9 @@
               <label class="mb-2 block text-sm font-medium text-slate-300">
                 {{ field.prompt }}
                 <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
+                <div v-if="sub2apiFieldHint(field.key)" class="mt-1 font-mono text-[11px] font-normal text-slate-500 break-all">
+                  {{ sub2apiFieldHint(field.key) }}
+                </div>
               </label>
               <input
                 v-model="runtimeForm[field.key]"
@@ -270,6 +273,9 @@
               <label class="mb-2 block text-sm font-medium text-slate-300">
                 {{ field.prompt }}
                 <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
+                <div v-if="sub2apiFieldHint(field.key)" class="mt-1 font-mono text-[11px] font-normal text-slate-500 break-all">
+                  {{ sub2apiFieldHint(field.key) }}
+                </div>
               </label>
               <select
                 v-if="isBooleanStringField(field.key)"
@@ -575,12 +581,30 @@ const sourceLoaded = ref(false)
 const sourceMessage = ref('')
 const sourceMessageClass = ref('')
 const runtimeRequiredKeys = new Set(['API_KEY'])
+const sub2apiFieldHints = {
+  SUB2API_URL: 'ENV: SUB2API_URL · Sub2API API base URL',
+  SUB2API_EMAIL: 'ENV: SUB2API_EMAIL · login.email',
+  SUB2API_PASSWORD: 'ENV: SUB2API_PASSWORD · login.password',
+  SUB2API_GROUP: 'ENV: SUB2API_GROUP · group_ids',
+  SUB2API_CONCURRENCY: 'ENV: SUB2API_CONCURRENCY · account.concurrency',
+  SUB2API_PRIORITY: 'ENV: SUB2API_PRIORITY · account.priority',
+  SUB2API_RATE_MULTIPLIER: 'ENV: SUB2API_RATE_MULTIPLIER · account.rate_multiplier',
+  SUB2API_AUTO_PAUSE_ON_EXPIRED: 'ENV: SUB2API_AUTO_PAUSE_ON_EXPIRED · account.auto_pause_on_expired',
+  SUB2API_MODEL_WHITELIST: 'ENV: SUB2API_MODEL_WHITELIST · credentials.model_mapping',
+  SUB2API_OPENAI_WS_MODE: 'ENV: SUB2API_OPENAI_WS_MODE · extra.openai_oauth_responses_websockets_v2_mode / enabled',
+  SUB2API_OPENAI_PASSTHROUGH: 'ENV: SUB2API_OPENAI_PASSTHROUGH · extra.openai_passthrough',
+  SUB2API_OVERWRITE_ACCOUNT_SETTINGS: 'ENV: SUB2API_OVERWRITE_ACCOUNT_SETTINGS · AutoTeam overwrite switch',
+}
 
 const selectedRuntimeCategory = computed(() => runtimeCategoryKeys[visualCategory.value] ? visualCategory.value : '')
 const currentRuntimeCategoryMeta = computed(() => runtimeCategoryMeta[selectedRuntimeCategory.value] || null)
 
 function fieldByKey(key) {
   return runtimeFields.value.find(field => field.key === key) || null
+}
+
+function sub2apiFieldHint(key) {
+  return sub2apiFieldHints[key] || ''
 }
 
 function fieldsByKeys(keys) {
