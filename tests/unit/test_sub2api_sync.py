@@ -2,6 +2,8 @@ import base64
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from autoteam import sub2api_sync
 from autoteam.codex_auth import CODEX_CLIENT_ID
 
@@ -151,6 +153,63 @@ def test_resolve_group_binding_supports_name_and_id(monkeypatch):
     assert group_names == ["Team Pool", "Group-9"]
 
 
+def test_resolve_proxy_id_supports_name_and_id(monkeypatch):
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_list_proxies",
+        lambda token: [
+            {"id": 42, "name": "Residential Pool"},
+        ],
+    )
+
+    assert sub2api_sync._resolve_proxy_id("token", "") is None
+    assert sub2api_sync._resolve_proxy_id("token", "42") == 42
+    assert sub2api_sync._resolve_proxy_id("token", "residential pool") == 42
+
+
+@pytest.mark.parametrize("proxy_spec", ["0", "-1"])
+def test_resolve_proxy_id_rejects_invalid_numeric_values(proxy_spec):
+    with pytest.raises(RuntimeError, match="代理 ID 必须是正整数"):
+        sub2api_sync._resolve_proxy_id("token", proxy_spec)
+
+
+def test_resolve_proxy_id_reports_unknown_name(monkeypatch):
+    monkeypatch.setattr(sub2api_sync, "_list_proxies", lambda token: [{"id": 42, "name": "Residential Pool"}])
+
+    with pytest.raises(RuntimeError, match="未找到代理"):
+        sub2api_sync._resolve_proxy_id("token", "Missing Proxy")
+
+
+def test_create_account_includes_proxy_id_only_when_provided(monkeypatch):
+    payloads = []
+
+    def fake_request(method, path, **kwargs):
+        payloads.append(kwargs["json"])
+        return {"id": len(payloads)}
+
+    monkeypatch.setattr(sub2api_sync, "_request", fake_request)
+
+    sub2api_sync._create_account(
+        "token",
+        name="with-proxy",
+        credentials={"access_token": "at-1"},
+        extra={},
+        label="创建账号",
+        proxy_id=42,
+    )
+    sub2api_sync._create_account(
+        "token",
+        name="without-proxy",
+        credentials={"access_token": "at-1"},
+        extra={},
+        label="创建账号",
+        proxy_id=None,
+    )
+
+    assert payloads[0]["proxy_id"] == 42
+    assert "proxy_id" not in payloads[1]
+
+
 def test_merge_group_ids_preserves_manual_groups_and_replaces_previous_managed_group():
     account = {
         "group_ids": [11, 21],
@@ -172,8 +231,10 @@ def test_remote_auth_file_candidates_include_legacy_and_prefixed_names():
 
 def test_sync_to_sub2api_preserves_existing_manual_settings_when_overwrite_disabled(monkeypatch, tmp_path):
     monkeypatch.setattr(sub2api_sync, "SUB2API_OVERWRITE_ACCOUNT_SETTINGS", False)
+    monkeypatch.setattr(sub2api_sync, "SUB2API_PROXY", "Residential Pool")
     monkeypatch.setattr(sub2api_sync, "_login", lambda: "token")
     monkeypatch.setattr(sub2api_sync, "_resolve_group_binding", lambda token: ([7], ["Team Pool"]))
+    monkeypatch.setattr(sub2api_sync, "_resolve_proxy_id", lambda token: 42)
     monkeypatch.setattr(sub2api_sync, "_list_openai_oauth_accounts", lambda token: [])
     monkeypatch.setattr(
         sub2api_sync,
@@ -235,6 +296,7 @@ def test_sync_to_sub2api_preserves_existing_manual_settings_when_overwrite_disab
     assert captured["extra"]["openai_oauth_responses_websockets_v2_enabled"] is True
     assert captured["extra"]["openai_passthrough"] is True
     assert captured["account_settings"] is None
+    assert "proxy_id" not in captured
 
 
 def test_sync_to_sub2api_overwrites_managed_settings_when_enabled(monkeypatch, tmp_path):
@@ -321,7 +383,53 @@ def test_sync_to_sub2api_overwrites_managed_settings_when_enabled(monkeypatch, t
     assert "openai_oauth_passthrough" not in captured["extra"]
 
 
+def test_sync_to_sub2api_resolves_proxy_name_for_new_pool_accounts(monkeypatch, tmp_path):
+    monkeypatch.setattr(sub2api_sync, "SUB2API_PROXY", "Residential Pool")
+    monkeypatch.setattr(sub2api_sync, "_login", lambda: "token")
+    monkeypatch.setattr(sub2api_sync, "_resolve_group_binding", lambda token: ([], []))
+    monkeypatch.setattr(sub2api_sync, "_list_proxies", lambda token: [{"id": 42, "name": "Residential Pool"}])
+    monkeypatch.setattr(sub2api_sync, "_list_openai_oauth_accounts", lambda token: [])
+    monkeypatch.setattr(sub2api_sync, "_dedupe_managed_accounts", lambda token, items, *, kind: ({}, 0))
+
+    auth_path = tmp_path / "codex-tmp@example.com-team-123.json"
+    auth_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {
+                "email": "tmp@example.com",
+                "status": "active",
+                "auth_file": str(auth_path),
+                "last_quota": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_load_auth_data",
+        lambda path: {
+            "email": "tmp@example.com",
+            "access_token": "at-1",
+            "refresh_token": "rt-1",
+        },
+    )
+
+    captured = {}
+
+    def fake_create_account(token, **kwargs):
+        captured.update(kwargs)
+        return {"id": 99}
+
+    monkeypatch.setattr(sub2api_sync, "_create_account", fake_create_account)
+
+    result = sub2api_sync.sync_to_sub2api()
+
+    assert result["created"] == 1
+    assert captured["proxy_id"] == 42
+
+
 def test_sync_main_codex_to_sub2api_creates_account_with_managed_defaults(monkeypatch, tmp_path):
+    monkeypatch.setattr(sub2api_sync, "SUB2API_PROXY", "Residential Pool")
     monkeypatch.setattr(sub2api_sync, "SUB2API_CONCURRENCY", 8)
     monkeypatch.setattr(sub2api_sync, "SUB2API_PRIORITY", 2)
     monkeypatch.setattr(sub2api_sync, "SUB2API_RATE_MULTIPLIER", 2.5)
@@ -367,3 +475,4 @@ def test_sync_main_codex_to_sub2api_creates_account_with_managed_defaults(monkey
     assert captured["extra"]["openai_oauth_responses_websockets_v2_mode"] == "passthrough"
     assert captured["extra"]["openai_oauth_responses_websockets_v2_enabled"] is True
     assert captured["extra"]["openai_passthrough"] is True
+    assert "proxy_id" not in captured

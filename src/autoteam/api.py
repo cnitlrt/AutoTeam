@@ -89,6 +89,7 @@ class SetupConfig(BaseModel):
     SUB2API_EMAIL: str = ""
     SUB2API_PASSWORD: str = ""
     SUB2API_GROUP: str = ""
+    SUB2API_PROXY: str = ""
     SUB2API_CONCURRENCY: str | int = "10"
     SUB2API_PRIORITY: str | int = "1"
     SUB2API_RATE_MULTIPLIER: str | int | float = "1"
@@ -108,6 +109,7 @@ class SourceConfig(BaseModel):
 
 _RUNTIME_CONFIG_CLEARABLE_FIELDS = {
     "SUB2API_GROUP",
+    "SUB2API_PROXY",
     "SUB2API_MODEL_WHITELIST",
     "PLAYWRIGHT_PROXY_URL",
     "PLAYWRIGHT_PROXY_BYPASS",
@@ -141,6 +143,7 @@ _ALL_RUNTIME_ENV_KEYS = [
     "SUB2API_EMAIL",
     "SUB2API_PASSWORD",
     "SUB2API_GROUP",
+    "SUB2API_PROXY",
     "SUB2API_CONCURRENCY",
     "SUB2API_PRIORITY",
     "SUB2API_RATE_MULTIPLIER",
@@ -521,6 +524,23 @@ def _validate_runtime_optional_values(values: dict[str, str]):
             return
         normalized[key] = "true" if value else "false"
 
+    def _normalize_sub2api_proxy(key: str):
+        raw = str(normalized.get(key, "") or "").strip()
+        if not raw:
+            normalized[key] = ""
+            return
+        if raw.lstrip("+-").isdigit():
+            try:
+                value = int(raw)
+            except ValueError as exc:
+                raise ValueError(f"{key} 必须是 Sub2API 代理 ID（正整数）或代理名称") from exc
+            if value <= 0:
+                raise ValueError(f"{key} 必须是 Sub2API 代理 ID（正整数）或代理名称")
+            normalized[key] = str(value)
+            return
+        normalized[key] = raw
+
+    _normalize_sub2api_proxy("SUB2API_PROXY")
     _normalize_positive_int("SUB2API_CONCURRENCY")
     _normalize_int("SUB2API_PRIORITY")
     _normalize_positive_float("SUB2API_RATE_MULTIPLIER")

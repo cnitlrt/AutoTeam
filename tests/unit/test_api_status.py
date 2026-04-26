@@ -160,6 +160,7 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
                 "CPA_URL=http://127.0.0.1:8317",
                 "CPA_KEY=key-1",
                 "SUB2API_CONCURRENCY=12",
+                "SUB2API_PROXY=Residential Pool",
                 "SUB2API_OPENAI_WS_MODE=ctx_pool",
                 "SUB2API_OPENAI_PASSTHROUGH=true",
                 "PLAYWRIGHT_PROXY_URL=socks5://127.0.0.1:1080",
@@ -179,6 +180,7 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
         "CPA_URL",
         "CPA_KEY",
         "SUB2API_CONCURRENCY",
+        "SUB2API_PROXY",
         "SUB2API_OPENAI_WS_MODE",
         "SUB2API_OPENAI_PASSTHROUGH",
         "PLAYWRIGHT_PROXY_URL",
@@ -197,6 +199,8 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
     assert fields["CPA_KEY"]["runtime_required"] is True
     assert fields["SUB2API_CONCURRENCY"]["value"] == "12"
     assert fields["SUB2API_CONCURRENCY"]["runtime_required"] is False
+    assert fields["SUB2API_PROXY"]["value"] == "Residential Pool"
+    assert fields["SUB2API_PROXY"]["runtime_required"] is False
     assert fields["SUB2API_OPENAI_WS_MODE"]["value"] == "ctx_pool"
     assert fields["SUB2API_OPENAI_PASSTHROUGH"]["value"] == "true"
     assert fields["PLAYWRIGHT_PROXY_URL"]["value"] == "socks5://127.0.0.1:1080"
@@ -315,6 +319,7 @@ def test_put_runtime_config_accepts_numeric_sub2api_fields(monkeypatch):
         api.SetupConfig(
             API_KEY="old-key",
             SUB2API_CONCURRENCY=15,
+            SUB2API_PROXY="Residential Pool",
             SUB2API_PRIORITY=2,
             SUB2API_RATE_MULTIPLIER=1.5,
             SUB2API_AUTO_PAUSE_ON_EXPIRED=True,
@@ -325,6 +330,7 @@ def test_put_runtime_config_accepts_numeric_sub2api_fields(monkeypatch):
 
     assert result["message"] == "配置保存成功"
     assert written["SUB2API_CONCURRENCY"] == "15"
+    assert written["SUB2API_PROXY"] == "Residential Pool"
     assert written["SUB2API_PRIORITY"] == "2"
     assert written["SUB2API_RATE_MULTIPLIER"] == "1.5"
     assert written["SUB2API_AUTO_PAUSE_ON_EXPIRED"] == "true"
@@ -336,6 +342,8 @@ def test_put_runtime_config_accepts_numeric_sub2api_fields(monkeypatch):
     ("payload", "message"),
     [
         ({"SUB2API_CONCURRENCY": "0"}, "SUB2API_CONCURRENCY 必须是正整数"),
+        ({"SUB2API_PROXY": "0"}, "SUB2API_PROXY 必须是 Sub2API 代理 ID（正整数）或代理名称"),
+        ({"SUB2API_PROXY": "-1"}, "SUB2API_PROXY 必须是 Sub2API 代理 ID（正整数）或代理名称"),
         ({"SUB2API_RATE_MULTIPLIER": "0"}, "SUB2API_RATE_MULTIPLIER 必须是大于 0 的数字"),
         ({"SUB2API_AUTO_PAUSE_ON_EXPIRED": "maybe"}, "SUB2API_AUTO_PAUSE_ON_EXPIRED 必须是 true 或 false"),
         ({"SUB2API_OPENAI_WS_MODE": "socket"}, "SUB2API_OPENAI_WS_MODE 必须是 off、ctx_pool 或 passthrough"),

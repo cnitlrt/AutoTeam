@@ -23,6 +23,7 @@ from autoteam.config import (
     SUB2API_OVERWRITE_ACCOUNT_SETTINGS,
     SUB2API_PASSWORD,
     SUB2API_PRIORITY,
+    SUB2API_PROXY,
     SUB2API_RATE_MULTIPLIER,
     SUB2API_URL,
 )
@@ -381,6 +382,50 @@ def _resolve_group_binding(token: str, group_spec: str | None = None) -> tuple[l
     return resolved_ids, resolved_names
 
 
+def _list_proxies(token: str) -> list[dict]:
+    data = _request(
+        "GET",
+        "/admin/proxies/all",
+        token=token,
+        label="获取 Sub2API 代理列表",
+    )
+    return data if isinstance(data, list) else []
+
+
+def _resolve_proxy_id(token: str, proxy_spec: str | None = None) -> int | None:
+    spec = str(proxy_spec if proxy_spec is not None else SUB2API_PROXY or "").strip()
+    if not spec:
+        return None
+
+    if spec.lstrip("+-").isdigit():
+        proxy_id = int(spec)
+        if proxy_id <= 0:
+            raise RuntimeError(f"[Sub2API] 代理 ID 必须是正整数: {spec}")
+        return proxy_id
+
+    proxies = _list_proxies(token)
+    matches = []
+    for item in proxies:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if name.lower() == spec.lower():
+            matches.append(item)
+
+    if not matches:
+        raise RuntimeError(f"[Sub2API] 未找到代理: {spec}")
+    if len(matches) > 1:
+        raise RuntimeError(f"[Sub2API] 找到多个同名代理: {spec}")
+
+    try:
+        proxy_id = int(matches[0].get("id") or 0)
+    except (TypeError, ValueError):
+        proxy_id = 0
+    if proxy_id <= 0:
+        raise RuntimeError(f"[Sub2API] 代理 {spec} 缺少有效 ID")
+    return proxy_id
+
+
 def _extract_organization_id(auth_claims: dict) -> str:
     organizations = auth_claims.get("organizations")
     if not isinstance(organizations, list):
@@ -592,6 +637,7 @@ def _create_account(
     label: str,
     group_ids: list[int] | None = None,
     account_settings: dict | None = None,
+    proxy_id: int | None = None,
 ) -> dict:
     payload = {
         "name": name,
@@ -602,6 +648,8 @@ def _create_account(
         **_build_account_settings(),
         "group_ids": list(group_ids or []),
     }
+    if proxy_id is not None:
+        payload["proxy_id"] = int(proxy_id)
     if account_settings:
         payload.update(account_settings)
     return _request(
@@ -704,6 +752,7 @@ def sync_to_sub2api():
 
     token = _login()
     group_ids, group_names = _resolve_group_binding(token)
+    proxy_id = _resolve_proxy_id(token)
     remote_accounts = _list_openai_oauth_accounts(token)
     existing_by_email, duplicates_deleted = _dedupe_managed_accounts(token, remote_accounts, kind=_KIND_POOL)
 
@@ -766,6 +815,7 @@ def sync_to_sub2api():
             label=f"创建账号 {email}",
             group_ids=group_ids,
             account_settings=_build_account_settings(),
+            proxy_id=proxy_id,
         )
         logger.info("[Sub2API] 创建: %s", email)
         created += 1
