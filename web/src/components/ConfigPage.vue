@@ -239,7 +239,7 @@
           <div class="mb-4">
             <div class="text-sm font-medium text-white">Sub2API</div>
             <div class="mt-1 text-xs leading-5 text-slate-400">
-              为已启用的 Sub2API 远端填写地址、管理员邮箱、密码、分组和可选代理绑定。
+              为已启用的 Sub2API 远端填写地址、管理员邮箱、密码和可选分组。
             </div>
           </div>
           <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -265,7 +265,7 @@
           <div class="mb-4">
             <div class="text-sm font-medium text-white">Sub2API 默认账号设置</div>
             <div class="mt-1 text-xs leading-5 text-slate-400">
-              新创建的 Sub2API 账号会自动带上这些默认参数；已存在账号默认不覆盖，只有开启“覆盖账号设置”后才会在每次同步时强制统一。
+              新创建的 Sub2API 账号会自动带上这些默认参数和可选代理绑定；已存在账号默认不覆盖，只有开启“覆盖账号设置”后才会在每次同步时强制统一（代理绑定仍只在新建账号时写入）。
             </div>
           </div>
           <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -506,7 +506,6 @@ const runtimeCategoryKeys = {
     'SUB2API_EMAIL',
     'SUB2API_PASSWORD',
     'SUB2API_GROUP',
-    'SUB2API_PROXY',
     'SUB2API_CONCURRENCY',
     'SUB2API_PRIORITY',
     'SUB2API_RATE_MULTIPLIER',
@@ -515,6 +514,7 @@ const runtimeCategoryKeys = {
     'SUB2API_OPENAI_WS_MODE',
     'SUB2API_OPENAI_PASSTHROUGH',
     'SUB2API_OVERWRITE_ACCOUNT_SETTINGS',
+    'SUB2API_PROXY',
   ],
   proxy: ['PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS'],
   security: ['API_KEY'],
@@ -626,7 +626,7 @@ const syncCpaEnabled = computed(() => String(runtimeForm.SYNC_TARGET_CPA || '').
 const syncSub2apiEnabled = computed(() => String(runtimeForm.SYNC_TARGET_SUB2API || '').toLowerCase() === 'true')
 const syncCpaFields = computed(() => syncCpaEnabled.value ? fieldsByKeys(['CPA_URL', 'CPA_KEY']) : [])
 const syncSub2apiConnectionFields = computed(() => syncSub2apiEnabled.value
-  ? fieldsByKeys(['SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP', 'SUB2API_PROXY'])
+  ? fieldsByKeys(['SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP'])
   : [])
 const syncSub2apiDefaultFields = computed(() => syncSub2apiEnabled.value
   ? fieldsByKeys([
@@ -638,6 +638,7 @@ const syncSub2apiDefaultFields = computed(() => syncSub2apiEnabled.value
       'SUB2API_OPENAI_WS_MODE',
       'SUB2API_OPENAI_PASSTHROUGH',
       'SUB2API_OVERWRITE_ACCOUNT_SETTINGS',
+      'SUB2API_PROXY',
     ])
   : [])
 
