@@ -84,34 +84,12 @@ SUB2API_GROUP=12,Team Pool
 - 同步主号 Codex 到 Sub2API 时也会自动带上这些分组
 - 更新时会保留账号原本手动绑定的其他分组，只替换 AutoTeam 自己管理的分组绑定
 
-## Sub2API 账号代理
-
-如果希望账号池同步到 Sub2API 后，新创建的 OpenAI OAuth 账号自动绑定 Sub2API 中已有的代理，可以设置：
-
-```dotenv
-SUB2API_PROXY=Residential Pool
-```
-
-也可以直接填写代理 ID：
-
-```dotenv
-SUB2API_PROXY=12
-```
-
-说明：
-
-- 支持 **代理名称** 或 **代理 ID**
-- 名称会通过 Sub2API 管理接口解析为账号创建请求里的 `proxy_id`
-- 只在账号池 active 账号同步到 Sub2API 且需要 **新建远端账号** 时写入
-- 更新已有远端账号时不会覆盖或清空原本的 `proxy_id`
-- 同步主号 Codex 到 Sub2API 时不使用该配置
-- 这里不是代理 URL，也不会影响 `PLAYWRIGHT_PROXY_URL` 或 AutoTeam 访问 Sub2API 管理 API 的网络路径
-
 ## Sub2API 默认账号设置
 
 AutoTeam 现在可以为 **新创建** 的 Sub2API OpenAI OAuth 账号自动写入默认参数：
 
 ```dotenv
+SUB2API_PROXY=Residential Pool
 SUB2API_CONCURRENCY=10
 SUB2API_PRIORITY=1
 SUB2API_RATE_MULTIPLIER=1
@@ -124,12 +102,15 @@ SUB2API_OVERWRITE_ACCOUNT_SETTINGS=false
 
 行为说明：
 
-- **创建新账号时**：总是使用这些默认值
-- **更新已有账号时**：默认不覆盖你在 Sub2API 后台手动修改过的并发、优先级、倍率、模型白名单、WS mode、passthrough
-- 如果设置 `SUB2API_OVERWRITE_ACCOUNT_SETTINGS=true`，则每次同步都会强制覆盖这些字段
+- **创建新账号时**：总是使用这些默认值；如果填写 `SUB2API_PROXY`，会把代理名称解析为 `proxy_id` 后写入账号
+- **更新已有账号时**：默认不覆盖你在 Sub2API 后台手动修改过的并发、优先级、倍率、模型白名单、WS mode、passthrough；代理绑定不会覆盖或清空已有 `proxy_id`
+- 如果设置 `SUB2API_OVERWRITE_ACCOUNT_SETTINGS=true`，则每次同步都会强制覆盖这些字段（代理绑定仍只在新建账号时写入）
 
 补充：
 
+- `SUB2API_PROXY` 支持 **代理名称** 或 **代理 ID**；名称会通过 Sub2API 管理接口解析为账号创建请求里的 `proxy_id`
+- `SUB2API_PROXY` 只作用于账号池 active 账号同步新建远端账号；同步主号 Codex 到 Sub2API 时不使用该配置
+- `SUB2API_PROXY` 不是代理 URL，也不会影响 `PLAYWRIGHT_PROXY_URL` 或 AutoTeam 访问 Sub2API 管理 API 的网络路径
 - `SUB2API_MODEL_WHITELIST` 会转换成 `credentials.model_mapping`
 - 留空表示 **不管理** `model_mapping`，不会主动清空已有白名单
 - `SUB2API_OPENAI_WS_MODE=off` 会写入：

@@ -41,7 +41,7 @@ REQUIRED_CONFIGS = [
     ("SUB2API_EMAIL", "Sub2API 管理员邮箱", "", True),
     ("SUB2API_PASSWORD", "Sub2API 管理员密码", "", True),
     ("SUB2API_GROUP", "Sub2API 分组（名称或 ID，可选）", "", True),
-    ("SUB2API_PROXY", "Sub2API 代理（ID 或名称，可选，仅账号池新建时写入）", "", True),
+    ("SUB2API_PROXY", "Sub2API 默认账号代理（ID 或名称，可选，仅账号池新建时写入）", "", True),
     ("SUB2API_CONCURRENCY", "Sub2API 默认并发数", "10", True),
     ("SUB2API_PRIORITY", "Sub2API 默认优先级", "1", True),
     ("SUB2API_RATE_MULTIPLIER", "Sub2API 默认倍率", "1", True),
