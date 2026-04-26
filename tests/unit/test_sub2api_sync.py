@@ -234,7 +234,11 @@ def test_sync_to_sub2api_preserves_existing_manual_settings_when_overwrite_disab
     monkeypatch.setattr(sub2api_sync, "SUB2API_PROXY", "Residential Pool")
     monkeypatch.setattr(sub2api_sync, "_login", lambda: "token")
     monkeypatch.setattr(sub2api_sync, "_resolve_group_binding", lambda token: ([7], ["Team Pool"]))
-    monkeypatch.setattr(sub2api_sync, "_resolve_proxy_id", lambda token: 42)
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_resolve_proxy_id",
+        lambda token: (_ for _ in ()).throw(AssertionError("proxy should not be resolved without create")),
+    )
     monkeypatch.setattr(sub2api_sync, "_list_openai_oauth_accounts", lambda token: [])
     monkeypatch.setattr(
         sub2api_sync,
@@ -310,6 +314,11 @@ def test_sync_to_sub2api_overwrites_managed_settings_when_enabled(monkeypatch, t
     monkeypatch.setattr(sub2api_sync, "SUB2API_MODEL_WHITELIST", "gpt-5.4,gpt-5.4-mini")
     monkeypatch.setattr(sub2api_sync, "_login", lambda: "token")
     monkeypatch.setattr(sub2api_sync, "_resolve_group_binding", lambda token: ([], []))
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_resolve_proxy_id",
+        lambda token: (_ for _ in ()).throw(AssertionError("proxy should not be resolved without create")),
+    )
     monkeypatch.setattr(sub2api_sync, "_list_openai_oauth_accounts", lambda token: [])
     monkeypatch.setattr(
         sub2api_sync,
@@ -381,6 +390,58 @@ def test_sync_to_sub2api_overwrites_managed_settings_when_enabled(monkeypatch, t
     assert captured["extra"]["openai_oauth_responses_websockets_v2_enabled"] is True
     assert "openai_passthrough" not in captured["extra"]
     assert "openai_oauth_passthrough" not in captured["extra"]
+
+
+def test_sync_to_sub2api_does_not_resolve_proxy_when_only_deleting_non_active_accounts(monkeypatch):
+    monkeypatch.setattr(sub2api_sync, "SUB2API_PROXY", "Missing Proxy")
+    monkeypatch.setattr(sub2api_sync, "_login", lambda: "token")
+    monkeypatch.setattr(sub2api_sync, "_resolve_group_binding", lambda token: ([], []))
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_resolve_proxy_id",
+        lambda token: (_ for _ in ()).throw(AssertionError("proxy should not be resolved without create")),
+    )
+    monkeypatch.setattr(sub2api_sync, "_list_openai_oauth_accounts", lambda token: [])
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {
+                "email": "tmp@example.com",
+                "status": "standby",
+                "auth_file": "",
+                "last_quota": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_dedupe_managed_accounts",
+        lambda token, items, *, kind: (
+            {
+                "tmp@example.com": {
+                    "id": 12,
+                    "status": "active",
+                    "credentials": {"email": "tmp@example.com"},
+                    "extra": {},
+                    "group_ids": [],
+                }
+            },
+            0,
+        ),
+    )
+
+    deleted = []
+
+    def fake_delete_account(token, account, **kwargs):
+        deleted.append((account["id"], kwargs["label"]))
+        return {"ok": True}
+
+    monkeypatch.setattr(sub2api_sync, "_delete_account", fake_delete_account)
+
+    result = sub2api_sync.sync_to_sub2api()
+
+    assert result["deleted"] == 1
+    assert deleted == [(12, "删除非 active 账号")]
 
 
 def test_sync_to_sub2api_resolves_proxy_name_for_new_pool_accounts(monkeypatch, tmp_path):

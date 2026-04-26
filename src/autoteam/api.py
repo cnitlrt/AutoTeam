@@ -89,7 +89,7 @@ class SetupConfig(BaseModel):
     SUB2API_EMAIL: str = ""
     SUB2API_PASSWORD: str = ""
     SUB2API_GROUP: str = ""
-    SUB2API_PROXY: str = ""
+    SUB2API_PROXY: str | int = ""
     SUB2API_CONCURRENCY: str | int = "10"
     SUB2API_PRIORITY: str | int = "1"
     SUB2API_RATE_MULTIPLIER: str | int | float = "1"

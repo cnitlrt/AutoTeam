@@ -752,7 +752,6 @@ def sync_to_sub2api():
 
     token = _login()
     group_ids, group_names = _resolve_group_binding(token)
-    proxy_id = _resolve_proxy_id(token)
     remote_accounts = _list_openai_oauth_accounts(token)
     existing_by_email, duplicates_deleted = _dedupe_managed_accounts(token, remote_accounts, kind=_KIND_POOL)
 
@@ -770,6 +769,8 @@ def sync_to_sub2api():
     updated = 0
     deleted = 0
     overwrite_account_settings = SUB2API_OVERWRITE_ACCOUNT_SETTINGS
+    proxy_id = None
+    proxy_id_resolved = False
 
     for email, target in active_targets.items():
         desired_credentials = _build_credentials(target["auth_data"])
@@ -804,6 +805,10 @@ def sync_to_sub2api():
             logger.info("[Sub2API] 更新: %s", email)
             updated += 1
             continue
+
+        if not proxy_id_resolved:
+            proxy_id = _resolve_proxy_id(token)
+            proxy_id_resolved = True
 
         _apply_managed_credentials_settings(desired_credentials)
         _apply_managed_extra_settings(desired_extra)

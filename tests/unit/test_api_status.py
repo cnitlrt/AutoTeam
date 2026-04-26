@@ -338,6 +338,20 @@ def test_put_runtime_config_accepts_numeric_sub2api_fields(monkeypatch):
     assert written["SUB2API_OVERWRITE_ACCOUNT_SETTINGS"] == "true"
 
 
+def test_put_runtime_config_accepts_numeric_sub2api_proxy(monkeypatch):
+    written = {}
+
+    monkeypatch.setattr("autoteam.setup_wizard._write_env", lambda key, value: written.setdefault(key, value))
+    monkeypatch.setattr("importlib.reload", lambda module: module)
+    monkeypatch.setattr(api, "API_KEY", "old-key")
+    monkeypatch.setenv("API_KEY", "old-key")
+
+    result = api.put_runtime_config(api.SetupConfig(API_KEY="old-key", SUB2API_PROXY=15))
+
+    assert result["message"] == "配置保存成功"
+    assert written["SUB2API_PROXY"] == "15"
+
+
 @pytest.mark.parametrize(
     ("payload", "message"),
     [
