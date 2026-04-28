@@ -26,6 +26,7 @@ from playwright.sync_api import sync_playwright
 from autoteam.chatgpt_api import ChatGPTTeamAPI
 from autoteam.config import get_playwright_launch_options
 from autoteam.mail_provider import get_mail_client as CloudMailClient
+from autoteam.signup_profile import SignupProfile, generate_signup_profile
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +76,81 @@ def wait_for_cloudflare(page, max_wait=60):
     return False
 
 
-def register_with_invite(page, invite_link, email, mail_client, password=None):
+def _complete_invite_about_you(page, signup_profile: SignupProfile) -> bool:
+    name_input = find_visible(
+        page,
+        [
+            'input[name="name"]',
+            'input[placeholder*="name" i]',
+            'input[id="name"]',
+            'input[placeholder*="全名" i]',
+        ],
+        "名字输入框",
+        timeout=5000,
+    )
+
+    if name_input:
+        name_input.fill(signup_profile.full_name)
+        logger.info("[注册] 已填入随机姓名: %s", signup_profile.full_name)
+        time.sleep(0.5)
+
+    filled_age = False
+    spinbuttons = page.locator('[role="spinbutton"]').all()
+    if len(spinbuttons) >= 3:
+        try:
+            page.locator("text=生日日期").click()
+            time.sleep(0.5)
+        except Exception:
+            pass
+        for sb, val in zip(spinbuttons[:3], signup_profile.positional_birthday_orders()[0]):
+            sb.click(force=True)
+            time.sleep(0.2)
+            page.keyboard.type(val, delay=80)
+            time.sleep(0.3)
+        logger.info("[注册] 已填入随机生日: %s (spinbutton)", signup_profile.birthday_text)
+        filled_age = True
+    else:
+        age_input = find_visible(
+            page,
+            [
+                'input[name="age"]',
+                'input[id="age"]',
+                'input[placeholder*="age" i]',
+                'input[placeholder*="年龄" i]',
+                'input[type="number"]',
+            ],
+            "年龄输入框",
+            timeout=3000,
+        )
+        if age_input:
+            age_input.fill(signup_profile.age_text)
+            logger.info("[注册] 已填入随机年龄: %s", signup_profile.age_text)
+            filled_age = True
+
+    if not (name_input or filled_age):
+        return False
+
+    find_and_click(
+        page,
+        [
+            'button:has-text("完成帐户创建")',
+            'button:has-text("Complete")',
+            'button:has-text("Continue")',
+            'button:has-text("Agree")',
+            'button[type="submit"]',
+        ],
+        "完成按钮",
+    )
+    time.sleep(8)
+    screenshot(page, "reg_07_after_profile.png")
+    return True
+
+
+def register_with_invite(
+    page, invite_link, email, mail_client, password=None, signup_profile: SignupProfile | None = None
+):
     """用邀请链接注册 ChatGPT 账号并加入 workspace，返回 (success, password)"""
+    signup_profile = signup_profile or generate_signup_profile()
 
     logger.info("[注册] 打开邀请链接...")
     page.goto(invite_link, wait_until="domcontentloaded", timeout=60000)
@@ -250,73 +324,7 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
     screenshot(page, "reg_06_after_code.png")
     logger.info("[注册] 当前 URL: %s", page.url)
 
-    # 填写个人信息（全名 + 生日/年龄）
-    name_input = find_visible(
-        page,
-        [
-            'input[name="name"]',
-            'input[placeholder*="name" i]',
-            'input[id="name"]',
-            'input[placeholder*="全名" i]',
-        ],
-        "名字输入框",
-        timeout=5000,
-    )
-
-    if name_input:
-        name_input.fill("User")
-        time.sleep(0.5)
-
-    # 自适应：生日日期（spinbutton）或年龄（普通 input）
-    filled_age = False
-    spinbuttons = page.locator('[role="spinbutton"]').all()
-    if len(spinbuttons) >= 3:
-        # 类型 A：React Aria DateField（年/月/日 spinbutton）
-        try:
-            page.locator("text=生日日期").click()
-            time.sleep(0.5)
-        except Exception:
-            pass
-        for sb, val in zip(spinbuttons[:3], ["1995", "06", "15"]):
-            sb.click(force=True)
-            time.sleep(0.2)
-            page.keyboard.type(val, delay=80)
-            time.sleep(0.3)
-        logger.info("[注册] 填入生日: 1995/06/15 (spinbutton)")
-        filled_age = True
-    else:
-        # 类型 B：普通年龄数字输入框
-        age_input = find_visible(
-            page,
-            [
-                'input[name="age"]',
-                'input[id="age"]',
-                'input[placeholder*="age" i]',
-                'input[placeholder*="年龄" i]',
-                'input[type="number"]',
-            ],
-            "年龄输入框",
-            timeout=3000,
-        )
-        if age_input:
-            age_input.fill("25")
-            logger.info("[注册] 填入年龄: 25")
-            filled_age = True
-
-    if name_input or filled_age:
-        find_and_click(
-            page,
-            [
-                'button:has-text("完成帐户创建")',
-                'button:has-text("Complete")',
-                'button:has-text("Continue")',
-                'button:has-text("Agree")',
-                'button[type="submit"]',
-            ],
-            "完成按钮",
-        )
-        time.sleep(8)
-        screenshot(page, "reg_07_after_profile.png")
+    _complete_invite_about_you(page, signup_profile)
 
     # 可能需要接受条款 / 加入 workspace
     find_and_click(

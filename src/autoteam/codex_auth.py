@@ -21,6 +21,7 @@ from autoteam.admin_state import (
 )
 from autoteam.auth_storage import AUTH_DIR, ensure_auth_dir, ensure_auth_file_permissions
 from autoteam.config import get_playwright_launch_options
+from autoteam.signup_profile import SignupProfile, generate_signup_profile
 from autoteam.textio import write_text
 
 logger = logging.getLogger(__name__)
@@ -315,6 +316,51 @@ def _wait_for_otp_submit_result(page, timeout=12):
     return "pending", None
 
 
+def _complete_oauth_about_you(page, signup_profile: SignupProfile | None = None) -> bool:
+    signup_profile = signup_profile or generate_signup_profile()
+
+    logger.info("[Codex] 检测到 about-you 页面，填写个人信息...")
+    try:
+        name_input = page.locator('input[name="name"]').first
+        if name_input.is_visible(timeout=3000):
+            name_input.fill(signup_profile.full_name)
+            logger.info("[Codex] 已填入随机姓名: %s", signup_profile.full_name)
+
+        spinbuttons = page.locator('[role="spinbutton"]').all()
+        if len(spinbuttons) >= 3:
+            try:
+                page.locator("text=生日日期").click()
+                time.sleep(0.5)
+            except Exception:
+                pass
+            for sb, val in zip(spinbuttons[:3], signup_profile.positional_birthday_orders()[0]):
+                sb.click(force=True)
+                time.sleep(0.2)
+                page.keyboard.type(val, delay=80)
+                time.sleep(0.3)
+            logger.info("[Codex] 已填入随机生日: %s (spinbutton)", signup_profile.birthday_text)
+        else:
+            age_input = page.locator('input[name="age"], input[placeholder*="年龄"]').first
+            try:
+                if age_input.is_visible(timeout=3000):
+                    age_input.fill(signup_profile.age_text)
+                    logger.info("[Codex] 已填入随机年龄: %s", signup_profile.age_text)
+            except Exception:
+                logger.warning("[Codex] 未找到年龄/生日输入框")
+
+        time.sleep(0.5)
+        page.locator(
+            'button:has-text("继续"), button:has-text("Continue"), button:has-text("完成帐户创建"), button[type="submit"]'
+        ).first.click()
+        time.sleep(5)
+        _screenshot(page, "codex_03d_after_aboutyou.png")
+        logger.info("[Codex] about-you 完成，当前 URL: %s", page.url)
+        return True
+    except Exception as e:
+        logger.error("[Codex] about-you 处理失败: %s", e)
+        return False
+
+
 def _is_workspace_ignored_label(text: str) -> bool:
     lowered = str(text or "").strip().lower()
     if lowered in _WORKSPACE_IGNORE_LABELS:
@@ -422,7 +468,9 @@ def _select_team_workspace(page, workspace_name: str) -> bool:
     return False
 
 
-def login_codex_via_browser(email, password, mail_client=None, *, return_result=False):
+def login_codex_via_browser(
+    email, password, mail_client=None, *, return_result=False, signup_profile: SignupProfile | None = None
+):
     """
     通过 Playwright 自动完成 Codex OAuth 登录。
     mail_client: CloudMailClient 实例，用于自动读取登录验证码。
@@ -711,48 +759,8 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
         elif code_input:
             logger.warning("[Codex] 需要验证码但无 mail_client，无法自动获取")
 
-        # 处理 about-you 页面（可能出现在 OAuth 流程中）
         if "about-you" in page.url:
-            logger.info("[Codex] 检测到 about-you 页面，填写个人信息...")
-            try:
-                name_input = page.locator('input[name="name"]').first
-                if name_input.is_visible(timeout=3000):
-                    name_input.fill("User")
-
-                # 自适应：生日日期（spinbutton）或年龄（普通 input）
-                spinbuttons = page.locator('[role="spinbutton"]').all()
-                if len(spinbuttons) >= 3:
-                    # 类型 A：React Aria DateField
-                    try:
-                        page.locator("text=生日日期").click()
-                        time.sleep(0.5)
-                    except Exception:
-                        pass
-                    for sb, val in zip(spinbuttons[:3], ["1995", "06", "15"]):
-                        sb.click(force=True)
-                        time.sleep(0.2)
-                        page.keyboard.type(val, delay=80)
-                        time.sleep(0.3)
-                    logger.info("[Codex] 填入生日: 1995/06/15 (spinbutton)")
-                else:
-                    # 类型 B：普通年龄数字输入框
-                    age_input = page.locator('input[name="age"], input[placeholder*="年龄"]').first
-                    try:
-                        if age_input.is_visible(timeout=3000):
-                            age_input.fill("25")
-                            logger.info("[Codex] 填入年龄: 25")
-                    except Exception:
-                        logger.warning("[Codex] 未找到年龄/生日输入框")
-
-                time.sleep(0.5)
-                page.locator(
-                    'button:has-text("继续"), button:has-text("Continue"), button:has-text("完成帐户创建"), button[type="submit"]'
-                ).first.click()
-                time.sleep(5)
-                _screenshot(page, "codex_03d_after_aboutyou.png")
-                logger.info("[Codex] about-you 完成，当前 URL: %s", page.url)
-            except Exception as e:
-                logger.error("[Codex] about-you 处理失败: %s", e)
+            _complete_oauth_about_you(page, signup_profile)
 
         # 处理多个授权/同意页面（可能有多步）
         for step in range(10):

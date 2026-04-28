@@ -66,6 +66,7 @@ from autoteam.mail_provider import (
 from autoteam.mail_provider import (
     get_mail_client as CloudMailClient,
 )
+from autoteam.signup_profile import SignupProfile, generate_signup_profile
 from autoteam.sync_targets import (
     sync_main_codex_to_configured_targets as sync_main_codex_to_cpa,
 )
@@ -304,7 +305,14 @@ def _record_auth_repair_failure(email: str, error_type: str | None = None, error
     return state
 
 
-def _login_codex_with_result(email: str, password: str, *, mail_client=None, max_attempts: int = 3) -> dict:
+def _login_codex_with_result(
+    email: str,
+    password: str,
+    *,
+    mail_client=None,
+    max_attempts: int = 3,
+    signup_profile: SignupProfile | None = None,
+) -> dict:
     max_attempts = max(1, int(max_attempts))
 
     def _single_attempt() -> dict:
@@ -323,19 +331,28 @@ def _login_codex_with_result(email: str, password: str, *, mail_client=None, max
             }
 
         try:
-            result = login_codex_via_browser(email, password, mail_client=mail_client, return_result=True)
+            result = login_codex_via_browser(
+                email,
+                password,
+                mail_client=mail_client,
+                return_result=True,
+                signup_profile=signup_profile,
+            )
         except TypeError:
-            bundle = login_codex_via_browser(email, password, mail_client=mail_client)
-            non_team = _reject_non_team(bundle)
-            if non_team:
-                return non_team
-            return {
-                "ok": bool(bundle),
-                "bundle": bundle,
-                "error_type": None if bundle else "login_failed",
-                "error_detail": None if bundle else "登录失败",
-                "retryable": False if bundle else True,
-            }
+            try:
+                result = login_codex_via_browser(email, password, mail_client=mail_client, return_result=True)
+            except TypeError:
+                bundle = login_codex_via_browser(email, password, mail_client=mail_client)
+                non_team = _reject_non_team(bundle)
+                if non_team:
+                    return non_team
+                return {
+                    "ok": bool(bundle),
+                    "bundle": bundle,
+                    "error_type": None if bundle else "login_failed",
+                    "error_detail": None if bundle else "登录失败",
+                    "retryable": False if bundle else True,
+                }
         except Exception as exc:
             return {
                 "ok": False,
@@ -1083,6 +1100,8 @@ def _complete_registration(email, password, invite_link, mail_client):
 
     from autoteam.invite import register_with_invite
 
+    signup_profile = generate_signup_profile()
+
     logger.info("[注册] 开始注册 %s...", email)
     with sync_playwright() as p:
         browser = p.chromium.launch(**get_playwright_launch_options())
@@ -1091,7 +1110,14 @@ def _complete_registration(email, password, invite_link, mail_client):
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
         )
         page = context.new_page()
-        result, password = register_with_invite(page, invite_link, email, mail_client, password=password)
+        result, password = register_with_invite(
+            page,
+            invite_link,
+            email,
+            mail_client,
+            password=password,
+            signup_profile=signup_profile,
+        )
         browser.close()
 
     if not result:
@@ -1099,7 +1125,12 @@ def _complete_registration(email, password, invite_link, mail_client):
         return None
 
     # Codex 登录
-    login_result = _login_codex_with_result(email, password, mail_client=mail_client)
+    login_result = _login_codex_with_result(
+        email,
+        password,
+        mail_client=mail_client,
+        signup_profile=signup_profile,
+    )
     bundle = login_result.get("bundle")
     if login_result.get("ok") and bundle:
         auth_file = save_auth_file(bundle)
@@ -1373,12 +1404,16 @@ def _infer_date_spinbutton_kind(meta):
     return None
 
 
-def _fill_about_you_birthday_by_meta(page):
+def _fill_about_you_birthday_by_meta(page, signup_profile: SignupProfile):
     metas = _collect_date_spinbutton_meta(page)
     if len(metas) < 3:
         return False
 
-    desired = {"year": "1995", "month": "06", "day": "15"}
+    desired = {
+        "year": signup_profile.birth_year_text,
+        "month": signup_profile.birth_month_text,
+        "day": signup_profile.birth_day_text,
+    }
     kind_to_meta = {}
 
     for meta in metas:
@@ -1405,7 +1440,7 @@ def _fill_about_you_birthday_by_meta(page):
             time.sleep(0.3)
 
         logger.info(
-            "[直接注册] 已按字段识别填入生日: year=%s month=%s day=%s | order=%s",
+            "[直接注册] 已填入随机生日: year=%s month=%s day=%s | order=%s",
             desired["year"],
             desired["month"],
             desired["day"],
@@ -1482,16 +1517,13 @@ def _wait_for_direct_step_change(page, current_step, timeout=15):
     return _detect_direct_register_step(page)
 
 
-def _complete_direct_about_you(page):
+def _complete_direct_about_you(page, signup_profile: SignupProfile | None = None):
     """尽量完成 about-you 页面，兼容不同生日字段顺序。"""
     if "about-you" not in (page.url or "").lower():
         return True
 
-    birthday_orders = [
-        ("1995", "06", "15"),
-        ("06", "15", "1995"),
-        ("15", "06", "1995"),
-    ]
+    signup_profile = signup_profile or generate_signup_profile()
+    birthday_orders = signup_profile.positional_birthday_orders()
 
     for attempt, values in enumerate(birthday_orders, 1):
         if "about-you" not in (page.url or "").lower():
@@ -1502,8 +1534,9 @@ def _complete_direct_about_you(page):
             if name_input.is_visible(timeout=2000):
                 try:
                     if name_input.is_editable(timeout=500):
-                        name_input.fill("User")
+                        name_input.fill(signup_profile.full_name)
                         time.sleep(0.3)
+                        logger.info("[直接注册] 已填入随机姓名: %s", signup_profile.full_name)
                 except Exception:
                     pass
         except Exception:
@@ -1516,7 +1549,7 @@ def _complete_direct_about_you(page):
             spinbuttons = []
 
         if len(spinbuttons) >= 3:
-            filled = _fill_about_you_birthday_by_meta(page)
+            filled = _fill_about_you_birthday_by_meta(page, signup_profile)
             if not filled:
                 for label_sel in ("text=生日日期", "text=Date of birth"):
                     try:
@@ -1537,7 +1570,7 @@ def _complete_direct_about_you(page):
                             pass
                         page.keyboard.type(val, delay=80)
                         time.sleep(0.3)
-                    logger.info("[直接注册] 尝试按位置填入生日（第 %d 次）: %s/%s/%s", attempt, *values)
+                    logger.info("[直接注册] 尝试按位置填入随机生日（第 %d 次）: %s/%s/%s", attempt, *values)
                 except Exception as exc:
                     logger.warning("[直接注册] 生日字段填写失败（第 %d 次）: %s", attempt, exc)
         else:
@@ -1546,8 +1579,8 @@ def _complete_direct_about_you(page):
                     'input[name="age"], input[placeholder*="年龄"], input[placeholder*="Age"]'
                 ).first
                 if age_input.is_visible(timeout=2000) and age_input.is_editable(timeout=500):
-                    age_input.fill("25")
-                    logger.info("[直接注册] 填入年龄: 25")
+                    age_input.fill(signup_profile.age_text)
+                    logger.info("[直接注册] 已填入随机年龄: %s", signup_profile.age_text)
             except Exception:
                 pass
 
@@ -1587,9 +1620,13 @@ def _complete_direct_about_you(page):
     return False
 
 
-def _register_direct_once(mail_client, email, password, mail_account_id=None):
+def _register_direct_once(
+    mail_client, email, password, mail_account_id=None, signup_profile: SignupProfile | None = None
+):
     """执行一次直接注册，返回是否完成注册并进入 Team。"""
     from playwright.sync_api import sync_playwright
+
+    signup_profile = signup_profile or generate_signup_profile()
 
     logger.info("[直接注册] %s", email)
     signup_url = "https://chatgpt.com/auth/login"
@@ -1834,7 +1871,7 @@ def _register_direct_once(mail_client, email, password, mail_account_id=None):
         logger.info("[直接注册] 当前 URL: %s", page.url)
 
         try:
-            _complete_direct_about_you(page)
+            _complete_direct_about_you(page, signup_profile)
         except Exception as exc:
             logger.warning("[直接注册] about-you 步骤异常: %s | URL: %s", exc, page.url)
 
@@ -1871,11 +1908,18 @@ def create_account_direct(mail_client):
 
     account_id, email = mail_client.create_temp_email()
     password = f"Tmp_{uuid.uuid4().hex[:12]}!"
+    signup_profile = generate_signup_profile()
 
     success = False
     for attempt in range(3):
         logger.info("[直接注册] 开始第 %d/3 次注册尝试: %s", attempt + 1, email)
-        success = _register_direct_once(mail_client, email, password, mail_account_id=account_id)
+        success = _register_direct_once(
+            mail_client,
+            email,
+            password,
+            mail_account_id=account_id,
+            signup_profile=signup_profile,
+        )
         if success:
             break
 
@@ -1905,7 +1949,12 @@ def create_account_direct(mail_client):
     )
 
     # Step 4: Codex 登录
-    login_result = _login_codex_with_result(email, password, mail_client=mail_client)
+    login_result = _login_codex_with_result(
+        email,
+        password,
+        mail_client=mail_client,
+        signup_profile=signup_profile,
+    )
     bundle = login_result.get("bundle")
     if login_result.get("ok") and bundle:
         auth_file = save_auth_file(bundle)
