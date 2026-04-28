@@ -424,23 +424,45 @@ def test_set_auto_check_config_persists_values_to_env(monkeypatch):
     sync_calls = []
 
     monkeypatch.setattr("autoteam.setup_wizard._write_env", lambda key, value: written.setdefault(key, value))
-    monkeypatch.setattr(api, "_auto_check_config", {"interval": 300, "threshold": 10, "min_low": 2})
+    monkeypatch.setattr(
+        api,
+        "_auto_check_config",
+        {"interval": 300, "threshold": 10, "min_low": 2, "retry_add_phone": True, "add_phone_max_retries": 3},
+    )
     monkeypatch.setattr(api, "_auto_check_restart", restart_event)
     monkeypatch.setattr(api, "_sync_runtime_env_reload_state", lambda: sync_calls.append("synced"))
 
-    result = api.set_auto_check_config(api.AutoCheckConfig(interval=420, threshold=15, min_low=3))
+    result = api.set_auto_check_config(
+        api.AutoCheckConfig(
+            interval=420,
+            threshold=15,
+            min_low=3,
+            retry_add_phone=False,
+            add_phone_max_retries=5,
+        )
+    )
 
-    assert result == {"interval": 420, "threshold": 15, "min_low": 3}
+    assert result == {
+        "interval": 420,
+        "threshold": 15,
+        "min_low": 3,
+        "retry_add_phone": False,
+        "add_phone_max_retries": 5,
+    }
     assert written == {
         "AUTO_CHECK_INTERVAL": "420",
         "AUTO_CHECK_THRESHOLD": "15",
         "AUTO_CHECK_MIN_LOW": "3",
+        "AUTO_CHECK_RETRY_ADD_PHONE": "false",
+        "AUTO_CHECK_ADD_PHONE_MAX_RETRIES": "5",
     }
     assert restart_event.is_set() is True
     assert sync_calls == ["synced"]
     assert os.environ["AUTO_CHECK_INTERVAL"] == "420"
     assert os.environ["AUTO_CHECK_THRESHOLD"] == "15"
     assert os.environ["AUTO_CHECK_MIN_LOW"] == "3"
+    assert os.environ["AUTO_CHECK_RETRY_ADD_PHONE"] == "false"
+    assert os.environ["AUTO_CHECK_ADD_PHONE_MAX_RETRIES"] == "5"
 
 
 @pytest.mark.parametrize(

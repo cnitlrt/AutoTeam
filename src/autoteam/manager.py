@@ -93,7 +93,8 @@ def _chatgpt_session_ready(chatgpt_api) -> bool:
     return bool(getattr(chatgpt_api, "browser", None))
 
 
-AUTH_REPAIR_HARD_FAILURE_TYPES = {"add_phone", "human_verification"}
+AUTH_REPAIR_HARD_FAILURE_TYPES = {"human_verification"}
+AUTH_REPAIR_SINGLE_ATTEMPT_FAILURE_TYPES = {"add_phone", "human_verification"}
 
 
 def _normalized_email(value: str | None) -> str:
@@ -219,6 +220,51 @@ def _auth_repair_retry_delays() -> tuple[int, int, int]:
     return (interval * 2, interval * 4, interval * 6)
 
 
+def _auth_repair_retry_add_phone_enabled() -> bool:
+    from autoteam.config import AUTO_CHECK_RETRY_ADD_PHONE
+
+    enabled = AUTO_CHECK_RETRY_ADD_PHONE
+    try:
+        from autoteam.api import _auto_check_config
+
+        enabled = bool(_auto_check_config.get("retry_add_phone", enabled))
+    except Exception:
+        pass
+
+    return bool(enabled)
+
+
+def _auth_repair_add_phone_max_retries() -> int:
+    from autoteam.config import AUTO_CHECK_ADD_PHONE_MAX_RETRIES
+
+    retries = AUTO_CHECK_ADD_PHONE_MAX_RETRIES
+    try:
+        from autoteam.api import _auto_check_config
+
+        retries = int(_auto_check_config.get("add_phone_max_retries", retries) or retries)
+    except Exception:
+        pass
+
+    return max(1, int(retries))
+
+
+def _auth_repair_add_phone_retry_delays(max_retries: int | None = None) -> tuple[int, ...]:
+    from autoteam.config import AUTO_CHECK_INTERVAL
+
+    interval = AUTO_CHECK_INTERVAL
+    try:
+        from autoteam.api import _auto_check_config
+
+        interval = int(_auto_check_config.get("interval", interval) or interval)
+    except Exception:
+        pass
+
+    retries = _auth_repair_add_phone_max_retries() if max_retries is None else max_retries
+    interval = max(60, int(interval))
+    retries = max(1, int(retries))
+    return tuple(interval * (2**idx) for idx in range(retries))
+
+
 def _auth_repair_error_label(error_type: str | None) -> str:
     mapping = {
         "add_phone": "手机号验证",
@@ -251,6 +297,37 @@ def _auth_repair_reset(email: str):
     update_account(email, **_auth_repair_reset_fields())
 
 
+def _release_auth_repair_team_seat(email: str, *, chatgpt_api=None) -> str:
+    managed_chatgpt = chatgpt_api
+    started_here = False
+
+    try:
+        if managed_chatgpt is None:
+            managed_chatgpt = ChatGPTTeamAPI()
+
+        if not _chatgpt_session_ready(managed_chatgpt):
+            managed_chatgpt.start()
+            started_here = True
+
+        return str(remove_from_team(managed_chatgpt, email, return_status=True))
+    except Exception as exc:
+        logger.warning("[认证修复] 释放 %s 的 Team 席位失败: %s", email, exc)
+        return "failed"
+    finally:
+        if started_here and _chatgpt_session_ready(managed_chatgpt):
+            managed_chatgpt.stop()
+
+
+def _auth_repair_result_suffix(result: dict | None) -> str:
+    result = result or {}
+    suffix = _auth_repair_state_suffix(result)
+    if result.get("seat_released"):
+        return f"{suffix}，已释放 Team 席位"
+    if result.get("release_attempted") and result.get("remove_status") == "failed":
+        return f"{suffix}，释放 Team 席位失败"
+    return suffix
+
+
 def _auth_repair_skip_reason(acc: dict | None, *, force: bool = False, now: float | None = None) -> str | None:
     if force or not acc:
         return None
@@ -269,14 +346,46 @@ def _auth_repair_skip_reason(acc: dict | None, *, force: bool = False, now: floa
     return None
 
 
-def _record_auth_repair_failure(email: str, error_type: str | None = None, error_detail: str | None = None) -> dict:
+def _record_auth_repair_failure(
+    email: str,
+    error_type: str | None = None,
+    error_detail: str | None = None,
+    *,
+    chatgpt_api=None,
+) -> dict:
     now = time.time()
     acc = find_account(load_accounts(), email) or {"email": email}
     error_type = error_type or "login_failed"
     error_detail = error_detail or _auth_repair_error_label(error_type)
     retry_delays = _auth_repair_retry_delays()
+    release_team_seat = False
 
-    if error_type in AUTH_REPAIR_HARD_FAILURE_TYPES:
+    if error_type == "add_phone" and _auth_repair_retry_add_phone_enabled():
+        prev_count = int(acc.get("auth_retry_count") or 0) if acc.get("auth_last_error") == "add_phone" else 0
+        next_count = prev_count + 1
+        max_retries = _auth_repair_add_phone_max_retries()
+        add_phone_delays = _auth_repair_add_phone_retry_delays(max_retries)
+
+        if next_count > max_retries:
+            state = {
+                "auth_retry_count": next_count,
+                "auth_last_error": error_type,
+                "auth_last_error_detail": error_detail,
+                "auth_last_failed_at": now,
+                "auth_retry_after": None,
+                "auth_retry_paused": True,
+            }
+            release_team_seat = True
+        else:
+            state = {
+                "auth_retry_count": next_count,
+                "auth_last_error": error_type,
+                "auth_last_error_detail": error_detail,
+                "auth_last_failed_at": now,
+                "auth_retry_after": now + add_phone_delays[next_count - 1],
+                "auth_retry_paused": False,
+            }
+    elif error_type in AUTH_REPAIR_HARD_FAILURE_TYPES or error_type == "add_phone":
         retry_count = max(int(acc.get("auth_retry_count") or 0), len(retry_delays))
         state = {
             "auth_retry_count": retry_count,
@@ -286,23 +395,44 @@ def _record_auth_repair_failure(email: str, error_type: str | None = None, error
             "auth_retry_after": None,
             "auth_retry_paused": True,
         }
-        update_account(email, **state)
-        return state
+    else:
+        prev_count = int(acc.get("auth_retry_count") or 0)
+        next_count = min(prev_count + 1, len(retry_delays))
+        delay = retry_delays[max(0, next_count - 1)]
+        retry_after = now + delay
+        state = {
+            "auth_retry_count": next_count,
+            "auth_last_error": error_type,
+            "auth_last_error_detail": error_detail,
+            "auth_last_failed_at": now,
+            "auth_retry_after": retry_after,
+            "auth_retry_paused": False,
+        }
 
-    prev_count = int(acc.get("auth_retry_count") or 0)
-    next_count = min(prev_count + 1, len(retry_delays))
-    delay = retry_delays[max(0, next_count - 1)]
-    retry_after = now + delay
-    state = {
-        "auth_retry_count": next_count,
-        "auth_last_error": error_type,
-        "auth_last_error_detail": error_detail,
-        "auth_last_failed_at": now,
-        "auth_retry_after": retry_after,
-        "auth_retry_paused": False,
-    }
     update_account(email, **state)
-    return state
+
+    is_team_member = _is_email_in_team(email)
+    if not is_team_member and acc.get("status") in (STATUS_ACTIVE, STATUS_EXHAUSTED, STATUS_AUTH_PENDING):
+        is_team_member = True
+
+    release_attempted = False
+    remove_status = None
+    seat_released = False
+    if release_team_seat and is_team_member:
+        release_attempted = True
+        remove_status = _release_auth_repair_team_seat(email, chatgpt_api=chatgpt_api)
+        seat_released = remove_status in ("removed", "already_absent")
+
+    final_status = STATUS_STANDBY if seat_released or not is_team_member else STATUS_AUTH_PENDING
+    update_account(email, status=final_status)
+
+    return {
+        **state,
+        "status": final_status,
+        "seat_released": seat_released,
+        "release_attempted": release_attempted,
+        "remove_status": remove_status,
+    }
 
 
 def _login_codex_with_result(
@@ -390,7 +520,7 @@ def _login_codex_with_result(
         last_result = result
         error_type = result.get("error_type")
         retryable = bool(result.get("retryable"))
-        if attempt >= max_attempts or not retryable or error_type in AUTH_REPAIR_HARD_FAILURE_TYPES:
+        if attempt >= max_attempts or not retryable or error_type in AUTH_REPAIR_SINGLE_ATTEMPT_FAILURE_TYPES:
             return result
 
         logger.warning(
@@ -999,32 +1129,30 @@ def cmd_check(force_auth_repair=False):
                     update_account(email, status=STATUS_ACTIVE, last_active_at=time.time())
                     logger.info("[%s] 额度可用", email)
                 elif status_str == "auth_error":
-                    final_status = _set_auth_pending_or_standby(email)
-                    state = _record_auth_repair_failure(
+                    result = _record_auth_repair_failure(
                         email,
                         login_result.get("error_type") or "non_team_plan",
                         login_result.get("error_detail") or "重新登录后仍无法查询额度",
                     )
-                    extra = _auth_repair_state_suffix(state)
+                    extra = _auth_repair_result_suffix(result)
                     logger.warning(
                         "[%s] 重新登录后仍无法查询额度（可能未选中 Team workspace），标记为 %s%s",
                         email,
-                        final_status,
+                        result.get("status"),
                         extra,
                     )
             else:
-                final_status = _set_auth_pending_or_standby(email)
-                state = _record_auth_repair_failure(
+                result = _record_auth_repair_failure(
                     email,
                     login_result.get("error_type"),
                     login_result.get("error_detail"),
                 )
-                extra = _auth_repair_state_suffix(state)
+                extra = _auth_repair_result_suffix(result)
                 logger.error(
                     "[%s] Codex 登录失败，标记为 %s（%s%s）",
                     email,
-                    final_status,
-                    _auth_repair_error_label(state.get("auth_last_error")),
+                    result.get("status"),
+                    _auth_repair_error_label(result.get("auth_last_error")),
                     extra,
                 )
 
@@ -1139,13 +1267,13 @@ def _complete_registration(email, password, invite_link, mail_client):
         logger.info("[注册] 账号就绪: %s", email)
         return email
     else:
-        update_account(email, status=STATUS_AUTH_PENDING)
-        state = _record_auth_repair_failure(email, login_result.get("error_type"), login_result.get("error_detail"))
-        extra = _auth_repair_state_suffix(state)
+        result = _record_auth_repair_failure(email, login_result.get("error_type"), login_result.get("error_detail"))
+        extra = _auth_repair_result_suffix(result)
         logger.warning(
-            "[注册] 账号已加入 Team 但 Codex 登录失败，标记为 auth_pending: %s（%s%s）",
+            "[注册] 账号已加入 Team 但 Codex 登录失败，标记为 %s: %s（%s%s）",
+            result.get("status"),
             email,
-            _auth_repair_error_label(state.get("auth_last_error")),
+            _auth_repair_error_label(result.get("auth_last_error")),
             extra,
         )
         return email
@@ -1963,13 +2091,13 @@ def create_account_direct(mail_client):
         logger.info("[直接注册] 账号就绪: %s", email)
         return email
     else:
-        update_account(email, status=STATUS_AUTH_PENDING)
-        state = _record_auth_repair_failure(email, login_result.get("error_type"), login_result.get("error_detail"))
-        extra = _auth_repair_state_suffix(state)
+        result = _record_auth_repair_failure(email, login_result.get("error_type"), login_result.get("error_detail"))
+        extra = _auth_repair_result_suffix(result)
         logger.warning(
-            "[直接注册] 账号已加入 Team 但 Codex 登录失败，标记为 auth_pending: %s（%s%s）",
+            "[直接注册] 账号已加入 Team 但 Codex 登录失败，标记为 %s: %s（%s%s）",
+            result.get("status"),
             email,
-            _auth_repair_error_label(state.get("auth_last_error")),
+            _auth_repair_error_label(result.get("auth_last_error")),
             extra,
         )
         return email
@@ -2012,14 +2140,18 @@ def reinvite_account(chatgpt_api, mail_client, acc):
     login_result = _login_codex_with_result(email, password, mail_client=mail_client)
     bundle = login_result.get("bundle")
     if not login_result.get("ok") or not bundle:
-        final_status = _set_auth_pending_or_standby(email)
-        state = _record_auth_repair_failure(email, login_result.get("error_type"), login_result.get("error_detail"))
-        extra = _auth_repair_state_suffix(state)
+        result = _record_auth_repair_failure(
+            email,
+            login_result.get("error_type"),
+            login_result.get("error_detail"),
+            chatgpt_api=chatgpt_api,
+        )
+        extra = _auth_repair_result_suffix(result)
         logger.warning(
             "[轮转] 旧账号 OAuth 登录失败，标记为 %s: %s（%s%s）",
-            final_status,
+            result.get("status"),
             email,
-            _auth_repair_error_label(state.get("auth_last_error")),
+            _auth_repair_error_label(result.get("auth_last_error")),
             extra,
         )
         return False
@@ -2027,9 +2159,13 @@ def reinvite_account(chatgpt_api, mail_client, acc):
     plan_type = (bundle.get("plan_type") or "").lower()
     if plan_type != "team":
         logger.warning("[轮转] 旧账号登录后 plan=%s，不是 team，恢复失败: %s", plan_type or "unknown", email)
-        final_status = _set_auth_pending_or_standby(email)
-        _record_auth_repair_failure(email, "non_team_plan", f"登录后 plan={plan_type or 'unknown'}")
-        logger.warning("[轮转] 旧账号保持状态为 %s: %s", final_status, email)
+        result = _record_auth_repair_failure(
+            email,
+            "non_team_plan",
+            f"登录后 plan={plan_type or 'unknown'}",
+            chatgpt_api=chatgpt_api,
+        )
+        logger.warning("[轮转] 旧账号保持状态为 %s: %s", result.get("status"), email)
         return False
 
     auth_file = save_auth_file(bundle)
@@ -2670,6 +2806,10 @@ def cmd_fill(target=5):
                 skip_reason = _auto_reuse_skip_reason(reusable)
                 if skip_reason:
                     logger.info("[填充] 跳过旧账号: %s（%s）", email, skip_reason)
+                    continue
+                retry_skip_reason = _auth_repair_skip_reason(reusable, force=False)
+                if retry_skip_reason:
+                    logger.info("[填充] 跳过旧账号: %s（%s）", email, retry_skip_reason)
                     continue
                 logger.info("[填充] 复用旧账号: %s", email)
                 # 确保 chatgpt 浏览器可用
