@@ -87,6 +87,7 @@ export const api = {
   startAdd: () => request('POST', '/tasks/add'),
   startFill: (target = 5) => request('POST', '/tasks/fill', { target }),
   startCleanup: (maxSeats = null) => request('POST', '/tasks/cleanup', { max_seats: maxSeats }),
+  startResetQuota: () => request('POST', '/tasks/reset-quota'),
 
   getTasks: () => request('GET', '/tasks'),
   getTask: (id) => request('GET', `/tasks/${id}`),

@@ -13,16 +13,25 @@
     <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
       <div class="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
         <h2 class="text-lg font-semibold text-white">账号列表</h2>
-        <button @click="syncAccounts" :disabled="syncing"
-          class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-xs rounded-lg border border-gray-700 transition disabled:opacity-50 text-gray-400 hover:text-white">
-          {{ syncing ? '同步中...' : '同步账号' }}
-        </button>
+        <div class="flex items-center gap-2">
+          <button @click="resetQuotaRecovery" :disabled="resetDisabled"
+            class="btn-secondary px-3 py-1.5 text-xs disabled:opacity-50"
+            :class="resetDisabled
+              ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+              : 'hover:text-white'">
+            {{ resetting ? '提交中...' : '重置额度恢复记录' }}
+          </button>
+          <button @click="syncAccounts" :disabled="syncDisabled"
+            class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-xs rounded-lg border border-gray-700 transition disabled:opacity-50 text-gray-400 hover:text-white">
+            {{ syncing ? '同步中...' : '同步账号' }}
+          </button>
+        </div>
       </div>
       <div v-if="message" class="mx-4 mt-4 px-4 py-3 rounded-lg text-sm border" :class="messageClass">
         {{ message }}
       </div>
       <div v-if="!adminReady" class="mx-4 mt-4 px-4 py-3 rounded-lg text-sm border bg-amber-500/10 text-amber-300 border-amber-500/20">
-        请先在「配置面板」页完成管理员登录后，才能操作账号。
+        请先在「配置面板」页完成管理员登录后，才能操作账号；“重置额度恢复记录”可单独使用。
       </div>
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
@@ -168,17 +177,20 @@ const props = defineProps({
     default: null,
   },
 })
-const emit = defineEmits(['refresh'])
+const emit = defineEmits(['refresh', 'task-started'])
 
 const actionEmail = ref('')
 const actionType = ref('')
 const syncing = ref(false)
+const resetting = ref(false)
 const message = ref('')
 const exportData = ref(null)
 const copied = ref(false)
 const messageClass = ref('')
 const adminReady = computed(() => !!props.adminStatus?.configured)
 const actionDisabled = computed(() => !!props.runningTask || !adminReady.value)
+const syncDisabled = computed(() => syncing.value || actionDisabled.value)
+const resetDisabled = computed(() => resetting.value || !!props.runningTask)
 
 const cards = computed(() => {
   if (!props.status) return []
@@ -295,6 +307,8 @@ function downloadExport() {
 }
 
 async function syncAccounts() {
+  if (syncDisabled.value) return
+
   syncing.value = true
   message.value = ''
   try {
@@ -307,6 +321,30 @@ async function syncAccounts() {
     messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
   } finally {
     syncing.value = false
+    setTimeout(() => { message.value = '' }, 8000)
+  }
+}
+
+async function resetQuotaRecovery() {
+  if (resetDisabled.value) return
+
+  const ok = window.confirm(
+    '确认清空所有托管非主号账号的本地额度恢复记录吗？\n\n这会清空 last_quota / quota_resets_at / quota_exhausted_at，并把 exhausted 账号恢复为可检查状态。\n不会自动执行轮转或检查。'
+  )
+  if (!ok) return
+
+  resetting.value = true
+  message.value = ''
+  try {
+    const result = await api.startResetQuota()
+    message.value = `任务已提交: ${result.task_id}`
+    messageClass.value = 'bg-blue-500/10 text-blue-400 border-blue-500/20'
+    emit('task-started')
+  } catch (e) {
+    message.value = e.message
+    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
+  } finally {
+    resetting.value = false
     setTimeout(() => { message.value = '' }, 8000)
   }
 }

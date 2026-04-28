@@ -2772,6 +2772,77 @@ def cmd_cleanup(max_seats=None):
         chatgpt.stop()
 
 
+def cmd_reset_quota_recovery():
+    """清空所有托管非主号账号的本地额度恢复记录。"""
+    accounts = load_accounts()
+    if not accounts:
+        summary = {
+            "total_accounts": 0,
+            "updated_accounts": 0,
+            "rearmed_exhausted_to_active": 0,
+            "rearmed_exhausted_to_auth_pending": 0,
+        }
+        logger.info("[额度重置] 本地无账号记录")
+        return summary
+
+    total_accounts = 0
+    updated_accounts = 0
+    rearmed_to_active = 0
+    rearmed_to_auth_pending = 0
+
+    for acc in accounts:
+        email = acc.get("email", "")
+        if _is_main_account_email(email):
+            continue
+
+        total_accounts += 1
+        changed = False
+
+        if acc.get("last_quota") is not None:
+            acc["last_quota"] = None
+            changed = True
+        if acc.get("quota_resets_at") is not None:
+            acc["quota_resets_at"] = None
+            changed = True
+        if acc.get("quota_exhausted_at") is not None:
+            acc["quota_exhausted_at"] = None
+            changed = True
+        if acc.get("quota_window") is not None:
+            acc["quota_window"] = None
+            changed = True
+
+        if acc.get("status") == STATUS_EXHAUSTED:
+            desired_status = STATUS_ACTIVE if _has_auth_file(acc) else STATUS_AUTH_PENDING
+            if acc.get("status") != desired_status:
+                acc["status"] = desired_status
+                changed = True
+            if desired_status == STATUS_ACTIVE:
+                rearmed_to_active += 1
+            else:
+                rearmed_to_auth_pending += 1
+
+        if changed:
+            updated_accounts += 1
+
+    if updated_accounts:
+        save_accounts(accounts)
+
+    summary = {
+        "total_accounts": total_accounts,
+        "updated_accounts": updated_accounts,
+        "rearmed_exhausted_to_active": rearmed_to_active,
+        "rearmed_exhausted_to_auth_pending": rearmed_to_auth_pending,
+    }
+    logger.info(
+        "[额度重置] 完成: 扫描 %d 个账号，更新 %d 个，恢复 exhausted -> active %d 个，exhausted -> auth_pending %d 个",
+        total_accounts,
+        updated_accounts,
+        rearmed_to_active,
+        rearmed_to_auth_pending,
+    )
+    return summary
+
+
 def cmd_pull_cpa():
     """从 CPA 反向同步认证文件到本地。"""
     result = sync_from_cpa()
@@ -2812,6 +2883,8 @@ def main():
 
     cleanup_p = sub.add_parser("cleanup", help="清理多余成员（只移除本地管理的）")
     cleanup_p.add_argument("max_seats", type=int, nargs="?", default=None, help="最大席位数")
+
+    sub.add_parser("reset-quota", help="清空本地额度恢复记录，并把 exhausted 账号恢复为可检查状态")
 
     sub.add_parser("sync", help="手动同步认证文件到已启用远端")
     sub.add_parser("pull-cpa", help="从 CPA 反向同步认证文件到本地")
@@ -2859,6 +2932,8 @@ def main():
         cmd_fill(args.target)
     elif args.command == "cleanup":
         cmd_cleanup(args.max_seats)
+    elif args.command == "reset-quota":
+        cmd_reset_quota_recovery()
     elif args.command == "sync":
         sync_to_cpa()
     elif args.command == "pull-cpa":

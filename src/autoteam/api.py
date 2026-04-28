@@ -2275,6 +2275,15 @@ def post_cleanup(params: CleanupParams = CleanupParams()):
     return task
 
 
+@app.post("/api/tasks/reset-quota", status_code=202)
+def post_reset_quota():
+    """清空本地额度恢复记录，并恢复 exhausted 账号为可检查状态（后台执行）"""
+    from autoteam.manager import cmd_reset_quota_recovery
+
+    task = _start_task("reset-quota", cmd_reset_quota_recovery, {})
+    return task
+
+
 @app.get("/api/tasks")
 def get_tasks():
     """查看所有任务"""

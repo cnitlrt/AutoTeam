@@ -581,7 +581,10 @@ def test_pool_task_endpoints_require_current_cloudflare_temp_email_config(monkey
     assert "CPA_KEY" not in exc.value.detail
 
 
-@pytest.mark.parametrize(("endpoint", "args"), [("post_check", ()), ("post_cleanup", (api.CleanupParams(),))])
+@pytest.mark.parametrize(
+    ("endpoint", "args"),
+    [("post_check", ()), ("post_cleanup", (api.CleanupParams(),)), ("post_reset_quota", ())],
+)
 def test_check_and_cleanup_do_not_require_mail_provider_config(monkeypatch, endpoint, args):
     monkeypatch.setattr(api, "_start_task", lambda command, func, params, *task_args, **task_kwargs: {"task_id": "t-1"})
     monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
@@ -600,6 +603,36 @@ def test_check_and_cleanup_do_not_require_mail_provider_config(monkeypatch, endp
     result = getattr(api, endpoint)(*args)
 
     assert result["task_id"] == "t-1"
+
+
+def test_post_reset_quota_starts_background_task_without_admin_or_pool_config(monkeypatch):
+    monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
+    for key in (
+        "MAIL_PROVIDER",
+        "CLOUDMAIL_BASE_URL",
+        "CLOUDMAIL_EMAIL",
+        "CLOUDMAIL_PASSWORD",
+        "CLOUDMAIL_DOMAIN",
+        "CF_TEMP_EMAIL_BASE_URL",
+        "CF_TEMP_EMAIL_ADMIN_PASSWORD",
+        "CF_TEMP_EMAIL_DOMAIN",
+        "CPA_URL",
+        "CPA_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    started = []
+
+    def fake_start_task(command, func, params, *task_args, **task_kwargs):
+        started.append((command, func.__name__, params, task_args, task_kwargs))
+        return {"task_id": command}
+
+    monkeypatch.setattr(api, "_start_task", fake_start_task)
+
+    result = api.post_reset_quota()
+
+    assert result == {"task_id": "reset-quota"}
+    assert started == [("reset-quota", "cmd_reset_quota_recovery", {}, (), {})]
 
 
 @pytest.mark.parametrize(

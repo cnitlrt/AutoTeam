@@ -122,7 +122,8 @@
 
       <!-- 页面内容 -->
         <Dashboard v-if="currentPage === 'dashboard'"
-          :status="status" :loading="loading" :running-task="busyTask" :admin-status="adminStatus" @refresh="refresh" />
+          :status="status" :loading="loading" :running-task="busyTask" :admin-status="adminStatus"
+          @refresh="refresh" @task-started="onTaskStarted" />
 
         <ConfigPage
           v-else-if="currentPage === 'config'"
