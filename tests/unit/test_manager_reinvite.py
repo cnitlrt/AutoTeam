@@ -53,8 +53,6 @@ def test_reinvite_account_uses_unified_oauth_login_and_marks_active(monkeypatch)
 
 
 def test_reinvite_account_marks_standby_when_oauth_login_returns_non_team(monkeypatch):
-    updates = []
-
     monkeypatch.setattr(
         manager,
         "login_codex_via_browser",
@@ -67,14 +65,8 @@ def test_reinvite_account_marks_standby_when_oauth_login_returns_non_team(monkey
     )
     monkeypatch.setattr(
         manager,
-        "update_account",
-        lambda email, **kwargs: updates.append((email, kwargs)),
-    )
-    monkeypatch.setattr(manager, "_record_auth_repair_failure", lambda *args, **kwargs: {})
-    monkeypatch.setattr(
-        manager,
-        "_is_email_in_team",
-        lambda email: False,
+        "_record_auth_repair_failure",
+        lambda *args, **kwargs: {"status": accounts.STATUS_STANDBY},
     )
 
     result = manager.reinvite_account(
@@ -84,33 +76,15 @@ def test_reinvite_account_marks_standby_when_oauth_login_returns_non_team(monkey
     )
 
     assert result is False
-    assert updates == [
-        (
-            "tmp-user@example.com",
-            {
-                "status": accounts.STATUS_STANDBY,
-                "auth_retry_count": 0,
-                "auth_last_error": None,
-                "auth_last_error_detail": None,
-                "auth_last_failed_at": None,
-                "auth_retry_after": None,
-                "auth_retry_paused": False,
-            },
-        )
-    ]
 
 
 def test_reinvite_account_marks_auth_pending_when_oauth_login_fails_but_team_seat_is_still_occupied(monkeypatch):
-    updates = []
-
     monkeypatch.setattr(manager, "login_codex_via_browser", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         manager,
-        "update_account",
-        lambda email, **kwargs: updates.append((email, kwargs)),
+        "_record_auth_repair_failure",
+        lambda *args, **kwargs: {"status": accounts.STATUS_AUTH_PENDING},
     )
-    monkeypatch.setattr(manager, "_record_auth_repair_failure", lambda *args, **kwargs: {})
-    monkeypatch.setattr(manager, "_is_email_in_team", lambda email: True)
 
     result = manager.reinvite_account(
         types.SimpleNamespace(browser=False),
@@ -119,4 +93,3 @@ def test_reinvite_account_marks_auth_pending_when_oauth_login_fails_but_team_sea
     )
 
     assert result is False
-    assert updates == [("tmp-user@example.com", {"status": accounts.STATUS_AUTH_PENDING})]

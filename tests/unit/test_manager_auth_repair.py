@@ -10,32 +10,53 @@ class _FakeMailClient:
         return None
 
 
-def test_record_auth_repair_failure_pauses_on_add_phone(monkeypatch):
+def test_record_auth_repair_failure_schedules_add_phone_retry_when_enabled(monkeypatch):
     updates = []
     monkeypatch.setattr(
         manager,
         "load_accounts",
-        lambda: [{"email": "user@example.com", "auth_retry_count": 1}],
+        lambda: [
+            {
+                "email": "user@example.com",
+                "status": "auth_pending",
+                "auth_retry_count": 5,
+                "auth_last_error": "auth_code_missing",
+            }
+        ],
     )
     monkeypatch.setattr(manager, "update_account", lambda email, **kwargs: updates.append((email, kwargs)))
     monkeypatch.setattr(manager.time, "time", lambda: 1_700_000_000)
+    monkeypatch.setattr(manager, "_auth_repair_retry_add_phone_enabled", lambda: True)
+    monkeypatch.setattr(manager, "_auth_repair_add_phone_max_retries", lambda: 3)
+    monkeypatch.setattr(manager, "_auth_repair_add_phone_retry_delays", lambda max_retries=None: (300, 600, 1_200))
+    monkeypatch.setattr(manager, "_is_email_in_team", lambda _email: True)
+    monkeypatch.setattr(
+        manager,
+        "_release_auth_repair_team_seat",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("should not release team seat before retries exhaust")
+        ),
+    )
 
     state = manager._record_auth_repair_failure("user@example.com", "add_phone", "需要手机号验证")
 
-    assert state["auth_retry_paused"] is True
-    assert state["auth_retry_after"] is None
+    assert state["auth_retry_count"] == 1
+    assert state["auth_retry_paused"] is False
+    assert state["auth_retry_after"] == 1_700_000_300
+    assert state["status"] == "auth_pending"
     assert updates == [
         (
             "user@example.com",
             {
-                "auth_retry_count": 3,
+                "auth_retry_count": 1,
                 "auth_last_error": "add_phone",
                 "auth_last_error_detail": "需要手机号验证",
                 "auth_last_failed_at": 1_700_000_000,
-                "auth_retry_after": None,
-                "auth_retry_paused": True,
+                "auth_retry_after": 1_700_000_300,
+                "auth_retry_paused": False,
             },
-        )
+        ),
+        ("user@example.com", {"status": "auth_pending"}),
     ]
 
 
@@ -44,11 +65,12 @@ def test_record_auth_repair_failure_uses_auto_check_interval_backoff(monkeypatch
     monkeypatch.setattr(
         manager,
         "load_accounts",
-        lambda: [{"email": "user@example.com", "auth_retry_count": 0}],
+        lambda: [{"email": "user@example.com", "status": "auth_pending", "auth_retry_count": 0}],
     )
     monkeypatch.setattr(manager, "update_account", lambda email, **kwargs: updates.append((email, kwargs)))
     monkeypatch.setattr(manager.time, "time", lambda: 1_700_000_000)
     monkeypatch.setattr(manager, "_auth_repair_retry_delays", lambda: (600, 1200, 1800))
+    monkeypatch.setattr(manager, "_is_email_in_team", lambda _email: True)
 
     state = manager._record_auth_repair_failure("user@example.com", "auth_code_missing", "未获取到 auth code")
 
@@ -65,7 +87,79 @@ def test_record_auth_repair_failure_uses_auto_check_interval_backoff(monkeypatch
                 "auth_retry_after": 1_700_000_600,
                 "auth_retry_paused": False,
             },
-        )
+        ),
+        ("user@example.com", {"status": "auth_pending"}),
+    ]
+
+
+def test_record_auth_repair_failure_pauses_on_add_phone_when_retry_disabled(monkeypatch):
+    updates = []
+    monkeypatch.setattr(
+        manager,
+        "load_accounts",
+        lambda: [{"email": "user@example.com", "status": "auth_pending", "auth_retry_count": 1}],
+    )
+    monkeypatch.setattr(manager, "update_account", lambda email, **kwargs: updates.append((email, kwargs)))
+    monkeypatch.setattr(manager.time, "time", lambda: 1_700_000_000)
+    monkeypatch.setattr(manager, "_auth_repair_retry_add_phone_enabled", lambda: False)
+    monkeypatch.setattr(manager, "_is_email_in_team", lambda _email: True)
+    monkeypatch.setattr(
+        manager,
+        "_release_auth_repair_team_seat",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("should not release team seat when retry is disabled")
+        ),
+    )
+
+    state = manager._record_auth_repair_failure("user@example.com", "add_phone", "需要手机号验证")
+
+    assert state["auth_retry_paused"] is True
+    assert state["auth_retry_after"] is None
+    assert state["status"] == "auth_pending"
+    assert updates[-1] == ("user@example.com", {"status": "auth_pending"})
+
+
+def test_record_auth_repair_failure_releases_team_seat_after_add_phone_retries_exhausted(monkeypatch):
+    updates = []
+    monkeypatch.setattr(
+        manager,
+        "load_accounts",
+        lambda: [
+            {
+                "email": "user@example.com",
+                "status": "auth_pending",
+                "auth_retry_count": 3,
+                "auth_last_error": "add_phone",
+            }
+        ],
+    )
+    monkeypatch.setattr(manager, "update_account", lambda email, **kwargs: updates.append((email, kwargs)))
+    monkeypatch.setattr(manager.time, "time", lambda: 1_700_000_000)
+    monkeypatch.setattr(manager, "_auth_repair_retry_add_phone_enabled", lambda: True)
+    monkeypatch.setattr(manager, "_auth_repair_add_phone_max_retries", lambda: 3)
+    monkeypatch.setattr(manager, "_is_email_in_team", lambda _email: True)
+    monkeypatch.setattr(manager, "_release_auth_repair_team_seat", lambda *_args, **_kwargs: "removed")
+
+    state = manager._record_auth_repair_failure("user@example.com", "add_phone", "需要手机号验证")
+
+    assert state["auth_retry_count"] == 4
+    assert state["auth_retry_paused"] is True
+    assert state["auth_retry_after"] is None
+    assert state["status"] == "standby"
+    assert state["seat_released"] is True
+    assert updates == [
+        (
+            "user@example.com",
+            {
+                "auth_retry_count": 4,
+                "auth_last_error": "add_phone",
+                "auth_last_error_detail": "需要手机号验证",
+                "auth_last_failed_at": 1_700_000_000,
+                "auth_retry_after": None,
+                "auth_retry_paused": True,
+            },
+        ),
+        ("user@example.com", {"status": "standby"}),
     ]
 
 
