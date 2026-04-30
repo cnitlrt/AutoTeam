@@ -827,7 +827,7 @@ def _check_and_refresh(acc):
     return status, info
 
 
-def cmd_check(force_auth_repair=False):
+def cmd_check(force_auth_repair=False, preserve_low_active=False, preserved_low_accounts=None):
     """检查可用账号额度，并尝试修复 Team 内认证未就绪的账号"""
     from autoteam.config import AUTO_CHECK_THRESHOLD
 
@@ -958,6 +958,23 @@ def cmd_check(force_auth_repair=False):
                     update_account(email, last_quota=info)
                     # 低于阈值视为用完
                     if p_remain < threshold:
+                        if preserve_low_active and not was_auth_pending:
+                            if preserved_low_accounts is not None:
+                                preserved_low_accounts.append(
+                                    {
+                                        "email": email,
+                                        "remaining": p_remain,
+                                        "quota": info,
+                                    }
+                                )
+                            logger.warning(
+                                "[%s] 5h剩余 %d%% < %d%%，seat=2 预切换模式暂不标记 exhausted (重置 %s)",
+                                email,
+                                p_remain,
+                                threshold,
+                                p_time,
+                            )
+                            continue
                         resets_at = p_reset or (time.time() + 18000)
                         logger.warning(
                             "[%s] 5h剩余 %d%% < %d%%，标记为 exhausted (重置 %s)", email, p_remain, threshold, p_time
@@ -2237,14 +2254,160 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
     def current_pool_active_count():
         return _count_pool_active_accounts(load_accounts(), require_auth=True)
 
+    def managed_account_ready(email):
+        acc = find_account(load_accounts(), email)
+        return bool(acc and acc.get("status") == STATUS_ACTIVE and _has_auth_file(acc))
+
+    def remove_team_member_to_standby(email, stage_label):
+        if not _chatgpt_session_ready(chatgpt):
+            ensure_chatgpt()
+        remove_status = remove_from_team(chatgpt, email, return_status=True)
+        if remove_status in ("removed", "already_absent"):
+            update_account(email, status=STATUS_STANDBY)
+            if remove_status == "removed":
+                logger.info("%s %s → standby（已从 Team 移出）", stage_label, email)
+            else:
+                logger.info("%s %s → standby（远端已不存在）", stage_label, email)
+            return True
+
+        logger.warning("%s 移除 %s 失败，无法继续处理", stage_label, email)
+        return False
+
+    def evaluate_standby_reuse(acc, stage_label):
+        email = acc["email"]
+        auth_file = acc.get("auth_file")
+
+        skip_reason = _auto_reuse_skip_reason(acc)
+        if skip_reason:
+            logger.info("%s 跳过 %s（%s）", stage_label, email, skip_reason)
+            return "auto_skip"
+
+        retry_skip_reason = _auth_repair_skip_reason(acc, force=force_auth_repair)
+        if retry_skip_reason:
+            logger.info("%s 跳过 %s（%s）", stage_label, email, retry_skip_reason)
+            return "retry_skip"
+
+        quota_ok = False
+        if auth_file and Path(auth_file).exists():
+            try:
+                auth_data = json.loads(read_text(Path(auth_file)))
+                access_token = auth_data.get("access_token")
+                if access_token:
+                    status_str, info = check_codex_quota(access_token)
+                    if status_str == "exhausted":
+                        quota_info = quota_result_quota_info(info)
+                        if quota_info:
+                            update_account(email, last_quota=quota_info)
+                        logger.info("%s 跳过 %s（额度未恢复）", stage_label, email)
+                        return "quota_skip"
+                    if status_str == "ok" and isinstance(info, dict):
+                        p_remain = 100 - info.get("primary_pct", 0)
+                        if p_remain < threshold:
+                            logger.info("%s 跳过 %s（剩余 %d%% < %d%%）", stage_label, email, p_remain, threshold)
+                            return "quota_skip"
+                        quota_ok = True
+                    if status_str == "auth_error":
+                        logger.info("%s %s 的认证已失效，改用保存的额度信息判断是否可复用", stage_label, email)
+            except Exception:
+                pass
+
+        if not quota_ok:
+            hold_info = _standby_reuse_hold_info(acc)
+            if hold_info:
+                window_label = _quota_window_label(hold_info.get("window"))
+                mins = max(0, int((hold_info["hold_until"] - time.time()) / 60))
+                logger.info(
+                    "%s 跳过 %s（保存的%s恢复时间未到，还需约 %d 分钟）", stage_label, email, window_label, mins
+                )
+                return "quota_skip"
+
+            lq = acc.get("last_quota")
+            if lq:
+                p_resets = lq.get("primary_resets_at", 0)
+                if p_resets and time.time() >= p_resets:
+                    logger.info("%s %s 的 5h 重置时间已过，视为额度已恢复", stage_label, email)
+                else:
+                    p_remain = 100 - lq.get("primary_pct", 0)
+                    if p_remain < threshold:
+                        logger.info("%s 跳过 %s（历史额度 %d%% < %d%%）", stage_label, email, p_remain, threshold)
+                        return "quota_skip"
+
+        return "ready"
+
+    def attempt_seat2_preswitch(low_candidates, current_count):
+        if TARGET != 2 or current_count != TARGET or not low_candidates:
+            return {"attempted": False, "current_count": current_count}
+
+        candidate = min(low_candidates, key=lambda item: item.get("remaining", 101))
+        old_email = candidate["email"]
+        logger.info("[4/5] seat=2 且检测到低额度子号，尝试先预切换再移除旧号: %s", old_email)
+
+        standby_list = [
+            a
+            for a in get_standby_accounts()
+            if not _is_main_account_email(a.get("email"))
+            and _normalized_email(a.get("email")) != _normalized_email(old_email)
+        ]
+
+        replacement_email = None
+        for acc in standby_list:
+            if evaluate_standby_reuse(acc, "[4/5][预切换]") != "ready":
+                continue
+
+            email = acc["email"]
+            logger.info("[4/5] seat=2 预切换：先尝试复用旧账号: %s", email)
+            if not _chatgpt_session_ready(chatgpt):
+                ensure_chatgpt()
+            if reinvite_account(chatgpt, ensure_account_mail(acc), acc):
+                replacement_email = email
+                break
+
+        if not replacement_email:
+            logger.info("[5/5] seat=2 预切换：尝试创建新账号...")
+            created_email = create_new_account(chatgpt, ensure_mail())
+            if created_email and managed_account_ready(created_email):
+                replacement_email = created_email
+            elif created_email:
+                logger.warning("[5/5] seat=2 预切换创建了未就绪子号，回收该占位: %s", created_email)
+                remove_team_member_to_standby(created_email, "[5/5]")
+
+        if replacement_email:
+            logger.info("[4/5] seat=2 预切换成功，新子号已就绪: %s，开始移除旧子号: %s", replacement_email, old_email)
+            removed = remove_team_member_to_standby(old_email, "[4/5]")
+            refreshed_count = refresh_current_count(current_count, "[4/5]")
+            if not removed:
+                logger.warning("[4/5] seat=2 预切换后旧子号移除失败，继续按当前 Team 状态收敛")
+            return {
+                "attempted": True,
+                "preswitch_success": True,
+                "current_count": refreshed_count,
+            }
+
+        logger.warning("[4/5] seat=2 预切换失败，回退到先移后补: %s", old_email)
+        removed = remove_team_member_to_standby(old_email, "[4/5]")
+        refreshed_count = refresh_current_count(max(0, current_count - 1), "[4/5]") if removed else current_count
+        return {
+            "attempted": True,
+            "preswitch_success": False,
+            "current_count": refreshed_count,
+        }
+
     logger.info("[1/5] 同步 Team 状态...")
     sync_account_states()
 
     logger.info("[2/5] 检查额度...")
+    preserved_low_accounts = []
     try:
-        cmd_check(force_auth_repair=force_auth_repair)
+        cmd_check(
+            force_auth_repair=force_auth_repair,
+            preserve_low_active=(TARGET == 2),
+            preserved_low_accounts=preserved_low_accounts,
+        )
     except TypeError:
-        cmd_check()
+        try:
+            cmd_check(force_auth_repair=force_auth_repair)
+        except TypeError:
+            cmd_check()
 
     try:
         # 移出所有 exhausted 账号（包括之前已标记的）
@@ -2302,6 +2465,14 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
                     "[4/5] 成员数保守估算: %d（初始=%d，移出=%d）", current_count, initial_api_count, removed_now
                 )
         vacancies = TARGET - current_count
+
+        if vacancies <= 0 and TARGET == 2 and current_count == TARGET and preserved_low_accounts:
+            preswitch_result = attempt_seat2_preswitch(preserved_low_accounts, current_count)
+            if preswitch_result.get("attempted"):
+                current_count = preswitch_result.get("current_count", current_count)
+                vacancies = TARGET - current_count
+                if current_count < TARGET:
+                    logger.info("[4/5] seat=2 已回退到先移后补，继续填补空缺...")
 
         if vacancies <= 0:
             excess = current_count - TARGET
@@ -2365,69 +2536,17 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
             if filled >= vacancies:
                 break
             email = acc["email"]
-            auth_file = acc.get("auth_file")
-
-            skip_reason = _auto_reuse_skip_reason(acc)
-            if skip_reason:
-                logger.info("[4/5] 跳过 %s（%s）", email, skip_reason)
+            evaluation = evaluate_standby_reuse(acc, "[4/5]")
+            if evaluation == "auto_skip":
                 auto_reuse_skipped.append(acc)
                 continue
-
-            retry_skip_reason = _auth_repair_skip_reason(acc, force=force_auth_repair)
-            if retry_skip_reason:
-                logger.info("[4/5] 跳过 %s（%s）", email, retry_skip_reason)
+            if evaluation == "retry_skip":
                 retry_throttled.append(acc)
                 continue
+            if evaluation == "quota_skip":
+                quota_skipped.append(acc)
+                continue
 
-            # 验证额度是否真的恢复了
-            quota_ok = False
-            if auth_file and Path(auth_file).exists():
-                try:
-                    auth_data = json.loads(read_text(Path(auth_file)))
-                    access_token = auth_data.get("access_token")
-                    if access_token:
-                        status_str, info = check_codex_quota(access_token)
-                        if status_str == "exhausted":
-                            quota_info = quota_result_quota_info(info)
-                            if quota_info:
-                                update_account(email, last_quota=quota_info)
-                            logger.info("[4/5] 跳过 %s（额度未恢复）", email)
-                            quota_skipped.append(acc)
-                            continue
-                        if status_str == "ok" and isinstance(info, dict):
-                            p_remain = 100 - info.get("primary_pct", 0)
-                            if p_remain < threshold:
-                                logger.info("[4/5] 跳过 %s（剩余 %d%% < %d%%）", email, p_remain, threshold)
-                                quota_skipped.append(acc)
-                                continue
-                            quota_ok = True
-                        if status_str == "auth_error":
-                            logger.info("[4/5] %s 的认证已失效，改用保存的额度信息判断是否可复用", email)
-                except Exception:
-                    pass
-
-            # 没有认证文件或无法查询额度时，用 last_quota / quota_resets_at 兜底
-            if not quota_ok:
-                hold_info = _standby_reuse_hold_info(acc)
-                if hold_info:
-                    window_label = _quota_window_label(hold_info.get("window"))
-                    mins = max(0, int((hold_info["hold_until"] - time.time()) / 60))
-                    logger.info("[4/5] 跳过 %s（保存的%s恢复时间未到，还需约 %d 分钟）", email, window_label, mins)
-                    quota_skipped.append(acc)
-                    continue
-
-                lq = acc.get("last_quota")
-                if lq:
-                    p_resets = lq.get("primary_resets_at", 0)
-                    if p_resets and time.time() >= p_resets:
-                        # 重置时间已过，旧数据作废，视为额度已恢复
-                        logger.info("[4/5] %s 的 5h 重置时间已过，视为额度已恢复", email)
-                    else:
-                        p_remain = 100 - lq.get("primary_pct", 0)
-                        if p_remain < threshold:
-                            logger.info("[4/5] 跳过 %s（历史额度 %d%% < %d%%）", email, p_remain, threshold)
-                            quota_skipped.append(acc)
-                            continue
             logger.info("[4/5] 复用: %s", email)
             if not _chatgpt_session_ready(chatgpt):
                 ensure_chatgpt()

@@ -75,6 +75,14 @@ Authorization: Bearer <API_KEY>
 
 > 同一时间只允许一个 Playwright 操作；如果有任务执行中，新请求可能返回 `409 Conflict`。
 
+`/api/config/auto-check` 当前包含这些关键字段：
+- `interval`
+- `target_seats`
+- `threshold`
+- `min_low`
+- `retry_add_phone`
+- `add_phone_max_retries`
+
 ## 管理员登录
 
 | 方法 | 路径 | 说明 |

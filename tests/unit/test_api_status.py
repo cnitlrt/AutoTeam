@@ -418,6 +418,30 @@ def test_post_account_login_rejects_non_team_plan(monkeypatch):
         api.post_account_login(api.LoginAccountParams(email="user@example.com"))
 
 
+def test_get_auto_check_config_includes_target_seats(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "_auto_check_config",
+        {
+            "interval": 300,
+            "target_seats": 7,
+            "threshold": 10,
+            "min_low": 2,
+            "retry_add_phone": True,
+            "add_phone_max_retries": 3,
+        },
+    )
+
+    assert api.get_auto_check_config() == {
+        "interval": 300,
+        "target_seats": 7,
+        "threshold": 10,
+        "min_low": 2,
+        "retry_add_phone": True,
+        "add_phone_max_retries": 3,
+    }
+
+
 def test_set_auto_check_config_persists_values_to_env(monkeypatch):
     written = {}
     restart_event = threading.Event()
@@ -427,7 +451,14 @@ def test_set_auto_check_config_persists_values_to_env(monkeypatch):
     monkeypatch.setattr(
         api,
         "_auto_check_config",
-        {"interval": 300, "threshold": 10, "min_low": 2, "retry_add_phone": True, "add_phone_max_retries": 3},
+        {
+            "interval": 300,
+            "target_seats": 5,
+            "threshold": 10,
+            "min_low": 2,
+            "retry_add_phone": True,
+            "add_phone_max_retries": 3,
+        },
     )
     monkeypatch.setattr(api, "_auto_check_restart", restart_event)
     monkeypatch.setattr(api, "_sync_runtime_env_reload_state", lambda: sync_calls.append("synced"))
@@ -435,6 +466,7 @@ def test_set_auto_check_config_persists_values_to_env(monkeypatch):
     result = api.set_auto_check_config(
         api.AutoCheckConfig(
             interval=420,
+            target_seats=6,
             threshold=15,
             min_low=3,
             retry_add_phone=False,
@@ -444,6 +476,7 @@ def test_set_auto_check_config_persists_values_to_env(monkeypatch):
 
     assert result == {
         "interval": 420,
+        "target_seats": 6,
         "threshold": 15,
         "min_low": 3,
         "retry_add_phone": False,
@@ -451,6 +484,7 @@ def test_set_auto_check_config_persists_values_to_env(monkeypatch):
     }
     assert written == {
         "AUTO_CHECK_INTERVAL": "420",
+        "AUTO_CHECK_TARGET_SEATS": "6",
         "AUTO_CHECK_THRESHOLD": "15",
         "AUTO_CHECK_MIN_LOW": "3",
         "AUTO_CHECK_RETRY_ADD_PHONE": "false",
@@ -459,6 +493,7 @@ def test_set_auto_check_config_persists_values_to_env(monkeypatch):
     assert restart_event.is_set() is True
     assert sync_calls == ["synced"]
     assert os.environ["AUTO_CHECK_INTERVAL"] == "420"
+    assert os.environ["AUTO_CHECK_TARGET_SEATS"] == "6"
     assert os.environ["AUTO_CHECK_THRESHOLD"] == "15"
     assert os.environ["AUTO_CHECK_MIN_LOW"] == "3"
     assert os.environ["AUTO_CHECK_RETRY_ADD_PHONE"] == "false"
@@ -1041,6 +1076,53 @@ def test_auto_check_falls_back_when_exhausted_quota_has_no_reset_time(tmp_path, 
     assert exhausted_update["quota_resets_at"] == 20000
 
 
+def test_auto_check_seat2_does_not_pre_mark_low_account_exhausted(tmp_path, monkeypatch):
+    auth_file = tmp_path / "low.json"
+    auth_file.write_text('{"access_token": "token-low"}', encoding="utf-8")
+
+    updates = []
+    started = []
+
+    def fake_start_task(command, func, params, *args, **kwargs):
+        started.append({"command": command, "params": params, "args": args})
+
+    _set_pool_runtime_config(monkeypatch)
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "target_seats": 2, "threshold": 10, "min_low": 1})
+    monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
+    monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
+    monkeypatch.setattr(api, "_maybe_reload_runtime_config_from_env_file", lambda *args, **kwargs: False)
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [{"email": "low@example.com", "status": "active", "auth_file": str(auth_file)}],
+    )
+    monkeypatch.setattr(
+        "autoteam.codex_auth.check_codex_quota",
+        lambda _token: ("ok", {"primary_pct": 93, "primary_resets_at": 1234567890, "weekly_pct": 1}),
+    )
+    monkeypatch.setattr(api, "_auto_check_team_member_count", lambda: 2)
+    monkeypatch.setattr("autoteam.accounts.update_account", lambda email, **kwargs: updates.append((email, kwargs)))
+    monkeypatch.setattr(api, "_require_pool_operation_configs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(api, "_start_task", fake_start_task)
+
+    stop_event = api._auto_check_stop
+    wait_calls = {"count": 0}
+
+    def fake_wait(_seconds):
+        wait_calls["count"] += 1
+        return wait_calls["count"] > 1
+
+    monkeypatch.setattr(stop_event, "wait", fake_wait)
+
+    api._auto_check_loop()
+
+    assert updates == []
+    assert len(started) == 1
+    assert started[0]["command"] == "auto-rotate"
+    assert started[0]["params"]["target"] == 2
+    assert started[0]["args"] == (2,)
+
+
 def test_auto_check_triggers_rotate_when_active_count_is_below_target(tmp_path, monkeypatch):
     auth_files = []
     for idx in range(3):
@@ -1060,7 +1142,7 @@ def test_auto_check_triggers_rotate_when_active_count_is_below_target(tmp_path, 
         )
 
     _set_pool_runtime_config(monkeypatch)
-    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2})
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "target_seats": 7, "threshold": 10, "min_low": 2})
     monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
     monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
     monkeypatch.setattr(api, "_maybe_reload_runtime_config_from_env_file", lambda *args, **kwargs: False)
@@ -1093,11 +1175,11 @@ def test_auto_check_triggers_rotate_when_active_count_is_below_target(tmp_path, 
 
     assert len(started) == 1
     assert started[0]["command"] == "auto-rotate"
-    assert started[0]["params"]["target"] == 5
+    assert started[0]["params"]["target"] == 7
     assert started[0]["params"]["trigger"] == "auto-check"
-    assert started[0]["params"]["shortage"] == 2
+    assert started[0]["params"]["shortage"] == 4
     assert started[0]["params"]["low_accounts"] == 0
-    assert started[0]["args"] == (5,)
+    assert started[0]["args"] == (7,)
 
 
 def test_auto_check_does_not_rotate_when_team_is_full_but_no_local_repair_candidate_exists(
@@ -1269,7 +1351,7 @@ def test_auto_check_logs_threshold_message_when_team_is_full_but_low_accounts_ar
 
 def test_auto_check_triggers_auth_repair_when_team_is_full_but_local_auth_pending_exists(tmp_path, monkeypatch):
     auth_files = []
-    for idx in range(3):
+    for idx in range(5):
         auth_file = tmp_path / f"active-{idx}.json"
         auth_file.write_text(json.dumps({"access_token": f"token-{idx}"}), encoding="utf-8")
         auth_files.append(auth_file)
@@ -1279,7 +1361,7 @@ def test_auto_check_triggers_auth_repair_when_team_is_full_but_local_auth_pendin
     def fake_start_task(command, func, params, *args, **kwargs):
         started.append((command, params, args, kwargs))
 
-    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2})
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "target_seats": 7, "threshold": 10, "min_low": 2})
     monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
     monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
     monkeypatch.setattr(api, "_maybe_reload_runtime_config_from_env_file", lambda *args, **kwargs: False)
@@ -1289,7 +1371,7 @@ def test_auto_check_triggers_auth_repair_when_team_is_full_but_local_auth_pendin
         lambda: (
             [
                 {"email": f"active-{idx}@example.com", "status": "active", "auth_file": str(auth_files[idx])}
-                for idx in range(3)
+                for idx in range(5)
             ]
             + [{"email": "pending-auth@example.com", "status": "auth_pending", "auth_file": None}]
         ),
@@ -1298,7 +1380,7 @@ def test_auto_check_triggers_auth_repair_when_team_is_full_but_local_auth_pendin
         "autoteam.codex_auth.check_codex_quota",
         lambda _token: ("ok", {"primary_pct": 10, "primary_resets_at": 1234567890, "weekly_pct": 1}),
     )
-    monkeypatch.setattr(api, "_auto_check_team_member_count", lambda: 5)
+    monkeypatch.setattr(api, "_auto_check_team_member_count", lambda: 7)
     monkeypatch.setattr(api, "_require_pool_operation_configs", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(api, "_start_task", fake_start_task)
 
@@ -1317,9 +1399,9 @@ def test_auto_check_triggers_auth_repair_when_team_is_full_but_local_auth_pendin
     command, params, args, kwargs = started[0]
     assert command == "auto-auth-repair"
     assert params["trigger"] == "auto-check"
-    assert params["team_count"] == 5
-    assert params["pool_active"] == 3
-    assert params["pool_active_target"] == 4
+    assert params["team_count"] == 7
+    assert params["pool_active"] == 5
+    assert params["pool_active_target"] == 6
     assert params["repair_candidates"] == ["pending-auth@example.com"]
     assert args == ()
     assert kwargs == {}

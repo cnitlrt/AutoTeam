@@ -159,6 +159,7 @@ _ALL_RUNTIME_ENV_KEYS = [
     "EMAIL_POLL_TIMEOUT",
     "API_KEY",
     "AUTO_CHECK_INTERVAL",
+    "AUTO_CHECK_TARGET_SEATS",
     "AUTO_CHECK_THRESHOLD",
     "AUTO_CHECK_MIN_LOW",
     "AUTO_CHECK_RETRY_ADD_PHONE",
@@ -584,10 +585,12 @@ def _sync_runtime_globals():
             AUTO_CHECK_INTERVAL,
             AUTO_CHECK_MIN_LOW,
             AUTO_CHECK_RETRY_ADD_PHONE,
+            AUTO_CHECK_TARGET_SEATS,
             AUTO_CHECK_THRESHOLD,
         )
 
         auto_check_config["interval"] = AUTO_CHECK_INTERVAL
+        auto_check_config["target_seats"] = AUTO_CHECK_TARGET_SEATS
         auto_check_config["threshold"] = AUTO_CHECK_THRESHOLD
         auto_check_config["min_low"] = AUTO_CHECK_MIN_LOW
         auto_check_config["retry_add_phone"] = AUTO_CHECK_RETRY_ADD_PHONE
@@ -2364,12 +2367,16 @@ from autoteam.config import (
     AUTO_CHECK_RETRY_ADD_PHONE as _DEFAULT_RETRY_ADD_PHONE,
 )
 from autoteam.config import (
+    AUTO_CHECK_TARGET_SEATS as _DEFAULT_TARGET_SEATS,
+)
+from autoteam.config import (
     AUTO_CHECK_THRESHOLD as _DEFAULT_THRESHOLD,
 )
 
 # 运行时可修改的巡检配置
 _auto_check_config = {
     "interval": _DEFAULT_INTERVAL,
+    "target_seats": _DEFAULT_TARGET_SEATS,
     "threshold": _DEFAULT_THRESHOLD,
     "min_low": _DEFAULT_MIN_LOW,
     "retry_add_phone": _DEFAULT_RETRY_ADD_PHONE,
@@ -2513,9 +2520,6 @@ def _auto_check_loop():
         sync_account_states,
     )
 
-    target_seats = 5
-    pool_active_target = _pool_active_target(target_seats)
-
     def _collect_auto_check_state(accounts, cfg):
         account_by_email = {
             (a.get("email") or "").strip().lower(): a for a in accounts if (a.get("email") or "").strip()
@@ -2598,9 +2602,12 @@ def _auto_check_loop():
             logger.warning("[配置] 自动热加载失败: %s", exc)
 
         cfg = _auto_check_config
+        target_seats = max(1, int(cfg.get("target_seats", _DEFAULT_TARGET_SEATS)))
+        pool_active_target = _pool_active_target(target_seats)
         logger.info(
-            "[巡检] 等待 %d 分钟后执行下一轮检查（阈值: %d%%, 触发: >=%d 个）",
+            "[巡检] 等待 %d 分钟后执行下一轮检查（目标 seat: %d, 阈值: %d%%, 触发: >=%d 个）",
             cfg["interval"] // 60,
+            target_seats,
             cfg["threshold"],
             cfg["min_low"],
         )
@@ -2614,6 +2621,8 @@ def _auto_check_loop():
 
         try:
             cfg = _auto_check_config  # 重新读取
+            target_seats = max(1, int(cfg.get("target_seats", _DEFAULT_TARGET_SEATS)))
+            pool_active_target = _pool_active_target(target_seats)
             accounts = load_accounts()
             state = _collect_auto_check_state(accounts, cfg)
             local_active_count = state["local_active_count"]
@@ -2705,6 +2714,14 @@ def _auto_check_loop():
                     from autoteam.codex_auth import quota_result_quota_info, quota_result_resets_at
 
                     for email, remaining, status, info in low_accounts:
+                        if target_seats == 2 and status == "ok":
+                            logger.info(
+                                "[巡检] %s 剩余 %d%% < %d%%，seat=2 预切换模式暂不预标记 exhausted",
+                                email,
+                                remaining,
+                                cfg["threshold"],
+                            )
+                            continue
                         logger.info("[巡检] %s 剩余 %d%%，标记为 exhausted", email, remaining)
                         status_kwargs = {
                             "status": STATUS_EXHAUSTED,
@@ -2853,6 +2870,7 @@ def _auto_check_loop():
 
 class AutoCheckConfig(BaseModel):
     interval: int = 300  # 巡检间隔（秒）
+    target_seats: int = 5  # 自动巡检目标 Team seat 数
     threshold: int = 10  # 额度阈值（%）
     min_low: int = 2  # 触发轮转的最少账号数
     retry_add_phone: bool = True  # 是否自动重试 add_phone
@@ -2862,12 +2880,14 @@ class AutoCheckConfig(BaseModel):
 def _normalized_auto_check_config(cfg: AutoCheckConfig | dict[str, object]) -> dict[str, int | bool]:
     if isinstance(cfg, AutoCheckConfig):
         interval = cfg.interval
+        target_seats = cfg.target_seats
         threshold = cfg.threshold
         min_low = cfg.min_low
         retry_add_phone = cfg.retry_add_phone
         add_phone_max_retries = cfg.add_phone_max_retries
     else:
         interval = cfg.get("interval", _auto_check_config.get("interval", _DEFAULT_INTERVAL))
+        target_seats = cfg.get("target_seats", _auto_check_config.get("target_seats", _DEFAULT_TARGET_SEATS))
         threshold = cfg.get("threshold", _auto_check_config.get("threshold", _DEFAULT_THRESHOLD))
         min_low = cfg.get("min_low", _auto_check_config.get("min_low", _DEFAULT_MIN_LOW))
         retry_add_phone = cfg.get(
@@ -2880,6 +2900,7 @@ def _normalized_auto_check_config(cfg: AutoCheckConfig | dict[str, object]) -> d
 
     return {
         "interval": max(60, int(interval)),
+        "target_seats": max(1, int(target_seats)),
         "threshold": max(1, min(100, int(threshold))),
         "min_low": max(1, int(min_low)),
         "retry_add_phone": bool(retry_add_phone),
@@ -2890,7 +2911,9 @@ def _normalized_auto_check_config(cfg: AutoCheckConfig | dict[str, object]) -> d
 @app.get("/api/config/auto-check")
 def get_auto_check_config():
     """获取巡检配置"""
-    return _auto_check_config.copy()
+    cfg = _auto_check_config.copy()
+    cfg.setdefault("target_seats", _DEFAULT_TARGET_SEATS)
+    return cfg
 
 
 @app.put("/api/config/auto-check")
@@ -2903,6 +2926,7 @@ def set_auto_check_config(cfg: AutoCheckConfig):
 
     persisted = {
         "AUTO_CHECK_INTERVAL": str(normalized["interval"]),
+        "AUTO_CHECK_TARGET_SEATS": str(normalized["target_seats"]),
         "AUTO_CHECK_THRESHOLD": str(normalized["threshold"]),
         "AUTO_CHECK_MIN_LOW": str(normalized["min_low"]),
         "AUTO_CHECK_RETRY_ADD_PHONE": "true" if normalized["retry_add_phone"] else "false",
@@ -2915,8 +2939,9 @@ def set_auto_check_config(cfg: AutoCheckConfig):
     _sync_runtime_env_reload_state()
     _auto_check_restart.set()  # 唤醒巡检线程，立即应用新配置
     logger.info(
-        "[巡检] 配置已更新并持久化: 间隔=%ds 阈值=%d%% 触发=%d个 add_phone自动重试=%s 最大重试=%d",
+        "[巡检] 配置已更新并持久化: 间隔=%ds 目标seat=%d 阈值=%d%% 触发=%d个 add_phone自动重试=%s 最大重试=%d",
         _auto_check_config["interval"],
+        _auto_check_config["target_seats"],
         _auto_check_config["threshold"],
         _auto_check_config["min_low"],
         "开" if _auto_check_config["retry_add_phone"] else "关",

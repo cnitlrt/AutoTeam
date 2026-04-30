@@ -337,13 +337,21 @@
         <span v-if="saved" class="text-xs text-green-400 transition">已保存</span>
       </div>
 
-      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
         <div>
           <label class="block text-sm text-gray-400 mb-1">巡检间隔</label>
           <div class="flex items-center gap-2">
             <input v-model.number="form.interval" type="number" min="1"
               class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500" />
             <span class="text-sm text-gray-500 shrink-0">分钟</span>
+          </div>
+        </div>
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">总 seat 数</label>
+          <div class="flex items-center gap-2">
+            <input v-model.number="form.target_seats" type="number" min="1"
+              class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500" />
+            <span class="text-sm text-gray-500 shrink-0">个</span>
           </div>
         </div>
         <div>
@@ -388,7 +396,9 @@
 
       <div class="mt-3 flex items-center justify-between gap-3">
         <p class="text-xs text-gray-500">
-          每 {{ form.interval }} 分钟检查一次，{{ form.min_low }} 个以上账号剩余低于 {{ form.threshold }}% 时自动轮转；
+          每 {{ form.interval }} 分钟检查一次，按 Team 总 seat {{ form.target_seats }} 个做自动轮转 / 补位判断；
+          {{ form.min_low }} 个以上账号剩余低于 {{ form.threshold }}% 时自动轮转；
+          <span v-if="form.target_seats === 2">seat=2 时会对低额度子号启用 best-effort 预切换，若满员无法先加新号则自动回退到先移后补；</span>
           add_phone {{ form.retry_add_phone ? `开启自动重试（最多 ${form.add_phone_max_retries} 次）` : '保持人工处理' }}
         </p>
         <button @click="save" :disabled="saving"
@@ -421,7 +431,7 @@ const props = defineProps({
 
 const emit = defineEmits(['refresh', 'admin-progress'])
 
-const form = ref({ interval: 5, threshold: 10, min_low: 2, retry_add_phone: true, add_phone_max_retries: 3 })
+const form = ref({ interval: 5, target_seats: 5, threshold: 10, min_low: 2, retry_add_phone: true, add_phone_max_retries: 3 })
 const saving = ref(false)
 const saved = ref(false)
 
@@ -506,6 +516,7 @@ async function loadAutoCheckConfig() {
     const cfg = await api.getAutoCheckConfig()
     form.value = {
       interval: Math.round(cfg.interval / 60),
+      target_seats: cfg.target_seats ?? 5,
       threshold: cfg.threshold,
       min_low: cfg.min_low,
       retry_add_phone: cfg.retry_add_phone ?? true,
@@ -724,6 +735,7 @@ async function save() {
   try {
     const cfg = await api.setAutoCheckConfig({
       interval: form.value.interval * 60,
+      target_seats: form.value.target_seats,
       threshold: form.value.threshold,
       min_low: form.value.min_low,
       retry_add_phone: !!form.value.retry_add_phone,
@@ -731,6 +743,7 @@ async function save() {
     })
     form.value = {
       interval: Math.round(cfg.interval / 60),
+      target_seats: cfg.target_seats ?? 5,
       threshold: cfg.threshold,
       min_low: cfg.min_low,
       retry_add_phone: cfg.retry_add_phone ?? true,

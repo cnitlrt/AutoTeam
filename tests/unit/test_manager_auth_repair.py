@@ -1,3 +1,4 @@
+import json
 import logging
 
 from autoteam import manager
@@ -318,3 +319,73 @@ def test_cmd_check_force_auth_repair_ignores_cooldown(monkeypatch):
     manager.cmd_check(force_auth_repair=True)
 
     assert calls == [("pending@example.com", "", "cloudmail")]
+
+
+def test_cmd_check_preserves_low_active_for_seat2_preswitch(tmp_path, monkeypatch):
+    auth_file = tmp_path / "active.json"
+    auth_file.write_text(json.dumps({"access_token": "token-active"}), encoding="utf-8")
+
+    updates = []
+    preserved = []
+
+    monkeypatch.setattr(
+        manager,
+        "load_accounts",
+        lambda: [
+            {
+                "email": "low@example.com",
+                "status": "active",
+                "auth_file": str(auth_file),
+                "last_quota": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(manager, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(manager, "get_mail_domain", lambda: "@example.com")
+    monkeypatch.setattr(
+        manager,
+        "_check_and_refresh",
+        lambda _acc: (
+            "ok",
+            {
+                "primary_pct": 93,
+                "primary_resets_at": 1_700_001_000,
+                "weekly_pct": 1,
+                "weekly_resets_at": 0,
+            },
+        ),
+    )
+    monkeypatch.setattr(manager, "update_account", lambda email, **kwargs: updates.append((email, kwargs)))
+
+    exhausted = manager.cmd_check(
+        force_auth_repair=False,
+        preserve_low_active=True,
+        preserved_low_accounts=preserved,
+    )
+
+    assert exhausted == []
+    assert preserved == [
+        {
+            "email": "low@example.com",
+            "remaining": 7,
+            "quota": {
+                "primary_pct": 93,
+                "primary_resets_at": 1_700_001_000,
+                "weekly_pct": 1,
+                "weekly_resets_at": 0,
+            },
+        }
+    ]
+    assert updates == [
+        (
+            "low@example.com",
+            {
+                "last_quota": {
+                    "primary_pct": 93,
+                    "primary_resets_at": 1_700_001_000,
+                    "weekly_pct": 1,
+                    "weekly_resets_at": 0,
+                }
+            },
+        )
+    ]
