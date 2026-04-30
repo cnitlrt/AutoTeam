@@ -269,6 +269,97 @@ def test_cmd_rotate_seat2_preswitch_reuses_standby_before_removing_old(tmp_path,
     assert next(acc for acc in state["accounts"] if acc["email"] == "standby@example.com")["status"] == "active"
 
 
+def test_cmd_rotate_seat2_preswitch_ignores_transient_overcount_after_old_member_removed(tmp_path, monkeypatch):
+    chatgpt = _FakeChatGPT()
+    events = []
+    old_auth = tmp_path / "old.json"
+    standby_auth = tmp_path / "standby.json"
+    old_auth.write_text("{}", encoding="utf-8")
+    standby_auth.write_text("{}", encoding="utf-8")
+
+    state = {
+        "team_count": 2,
+        "accounts": [
+            {
+                "email": "old@example.com",
+                "status": "active",
+                "auth_file": str(old_auth),
+                "last_quota": {"primary_pct": 93, "primary_resets_at": 1_700_001_000},
+            },
+            {
+                "email": "standby@example.com",
+                "status": "standby",
+                "auth_file": str(standby_auth),
+                "last_quota": {"primary_pct": 10, "primary_resets_at": 1_700_000_000},
+            },
+        ],
+    }
+    count_values = iter([2, 3])
+
+    def fake_load_accounts():
+        return [dict(acc) for acc in state["accounts"]]
+
+    def fake_update_account(email, **kwargs):
+        for acc in state["accounts"]:
+            if acc["email"] == email:
+                acc.update(kwargs)
+                break
+
+    def fake_cmd_check(*, force_auth_repair=False, preserve_low_active=False, preserved_low_accounts=None):
+        events.append(("cmd_check", preserve_low_active))
+        assert force_auth_repair is False
+        assert preserve_low_active is True
+        preserved_low_accounts.append({"email": "old@example.com", "remaining": 7, "quota": {}})
+        return []
+
+    def fake_reinvite(_chatgpt, _mail, acc):
+        events.append(("reinvite", acc["email"]))
+        state["team_count"] += 1
+        fake_update_account(acc["email"], status="active", last_active_at=1_700_000_000)
+        return True
+
+    def fake_remove(_chatgpt, email, *, return_status=False):
+        events.append(("remove", email, return_status))
+        state["team_count"] -= 1
+        return "removed" if return_status else True
+
+    monkeypatch.setattr(manager, "sync_account_states", lambda: events.append(("sync_account_states", None)))
+    monkeypatch.setattr(manager, "cmd_check", fake_cmd_check)
+    monkeypatch.setattr(manager, "ChatGPTTeamAPI", lambda: chatgpt)
+    monkeypatch.setattr(manager, "CloudMailClient", lambda: _FakeMailClient())
+    monkeypatch.setattr(manager, "load_accounts", fake_load_accounts)
+    monkeypatch.setattr(manager, "update_account", fake_update_account)
+    monkeypatch.setattr(manager, "get_team_member_count", lambda _chatgpt: next(count_values))
+    monkeypatch.setattr(
+        manager,
+        "get_standby_accounts",
+        lambda: [dict(acc) for acc in state["accounts"] if acc["status"] == "standby"],
+    )
+    monkeypatch.setattr(manager, "reinvite_account", fake_reinvite)
+    monkeypatch.setattr(
+        manager,
+        "create_new_account",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("should not create new account when standby reuse succeeds")
+        ),
+    )
+    monkeypatch.setattr(manager, "remove_from_team", fake_remove)
+    monkeypatch.setattr(manager, "sync_to_cpa", lambda: events.append(("sync_to_cpa", None)))
+
+    manager.cmd_rotate(target_seats=2)
+
+    assert events == [
+        ("sync_account_states", None),
+        ("cmd_check", True),
+        ("reinvite", "standby@example.com"),
+        ("remove", "old@example.com", True),
+        ("sync_to_cpa", None),
+    ]
+    assert state["team_count"] == 2
+    assert next(acc for acc in state["accounts"] if acc["email"] == "old@example.com")["status"] == "standby"
+    assert next(acc for acc in state["accounts"] if acc["email"] == "standby@example.com")["status"] == "active"
+
+
 def test_cmd_rotate_seat2_preswitch_falls_back_to_remove_then_create(tmp_path, monkeypatch):
     chatgpt = _FakeChatGPT()
     events = []

@@ -2375,11 +2375,23 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
             logger.info("[4/5] seat=2 预切换成功，新子号已就绪: %s，开始移除旧子号: %s", replacement_email, old_email)
             removed = remove_team_member_to_standby(old_email, "[4/5]")
             refreshed_count = refresh_current_count(current_count, "[4/5]")
+            transient_excess_observed = False
+            if removed and refreshed_count > TARGET:
+                transient_excess_observed = True
+                logger.info(
+                    "[4/5] seat=2 预切换后成员数暂时显示为 %d/%d，疑似远端列表延迟，保留新子号并跳过本轮超员清理",
+                    refreshed_count,
+                    TARGET,
+                )
+                refreshed_count = TARGET
             if not removed:
                 logger.warning("[4/5] seat=2 预切换后旧子号移除失败，继续按当前 Team 状态收敛")
             return {
                 "attempted": True,
                 "preswitch_success": True,
+                "replacement_email": replacement_email,
+                "old_removed": removed,
+                "transient_excess_observed": transient_excess_observed,
                 "current_count": refreshed_count,
             }
 
