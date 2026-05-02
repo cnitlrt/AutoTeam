@@ -1,7 +1,7 @@
 <template>
   <div v-if="status">
     <!-- 统计卡片 -->
-    <div class="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-4 mb-6">
+    <div class="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-4 mb-6">
       <div v-for="card in cards" :key="card.label"
         class="bg-gray-900 border border-gray-800 rounded-xl p-4">
         <div class="text-sm text-gray-400">{{ card.label }}</div>
@@ -14,6 +14,23 @@
       <div class="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
         <h2 class="text-lg font-semibold text-white">账号列表</h2>
         <div class="flex items-center gap-2">
+          <div v-if="selectedEmails.length" class="text-xs text-fuchsia-300">
+            已选 {{ selectedEmails.length }} 个
+          </div>
+          <button @click="bulkDisableSelected" :disabled="bulkDisableDisabled"
+            class="px-3 py-1.5 text-xs rounded-lg border transition disabled:opacity-50"
+            :class="bulkDisableDisabled
+              ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+              : 'bg-fuchsia-600/10 text-fuchsia-400 border-fuchsia-500/30 hover:bg-fuchsia-600/20'">
+            {{ bulkUpdating ? '批量处理中...' : `一键禁用${selectedDisableTargets.length ? `（${selectedDisableTargets.length}）` : ''}` }}
+          </button>
+          <button @click="bulkEnableSelected" :disabled="bulkEnableDisabled"
+            class="px-3 py-1.5 text-xs rounded-lg border transition disabled:opacity-50"
+            :class="bulkEnableDisabled
+              ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+              : 'bg-emerald-600/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-600/20'">
+            {{ bulkUpdating ? '批量处理中...' : `一键启用${selectedEnableTargets.length ? `（${selectedEnableTargets.length}）` : ''}` }}
+          </button>
           <button @click="resetQuotaRecovery" :disabled="resetDisabled"
             class="btn-secondary px-3 py-1.5 text-xs disabled:opacity-50"
             :class="resetDisabled
@@ -37,6 +54,14 @@
         <table class="w-full text-sm">
           <thead>
             <tr class="text-gray-400 text-left border-b border-gray-800">
+              <th class="px-4 py-3 font-medium w-10">
+                <input
+                  type="checkbox"
+                  :checked="allSelectableSelected"
+                  :disabled="!selectableAccounts.length || actionDisabled"
+                  @change="toggleSelectAll($event.target.checked)"
+                  class="h-4 w-4 rounded border-gray-700 bg-gray-900 text-fuchsia-500 focus:ring-fuchsia-500 disabled:opacity-40">
+              </th>
               <th class="px-4 py-3 font-medium">#</th>
               <th class="px-4 py-3 font-medium">邮箱</th>
               <th class="px-4 py-3 font-medium">状态</th>
@@ -50,6 +75,14 @@
           <tbody>
             <tr v-for="(acc, i) in status.accounts" :key="acc.email"
               class="border-b border-gray-800/50 hover:bg-gray-800/30 transition">
+              <td class="px-4 py-3">
+                <input
+                  type="checkbox"
+                  :checked="isSelected(acc.email)"
+                  :disabled="!isBulkSelectable(acc) || actionDisabled"
+                  @change="toggleAccountSelected(acc.email, $event.target.checked)"
+                  class="h-4 w-4 rounded border-gray-700 bg-gray-900 text-fuchsia-500 focus:ring-fuchsia-500 disabled:opacity-40">
+              </td>
               <td class="px-4 py-3 text-gray-500">{{ i + 1 }}</td>
               <td class="px-4 py-3 font-mono text-xs text-slate-200">{{ acc.email }}</td>
               <td class="px-4 py-3">
@@ -69,7 +102,7 @@
               <td class="px-4 py-3 text-gray-400 text-xs">{{ quotaReset(acc, 'weekly') }}</td>
               <td class="px-4 py-3 text-right space-x-2">
                 <button
-                  v-if="!acc.is_main_account && acc.status !== 'active'"
+                  v-if="!acc.is_main_account && !acc.disabled && acc.raw_status !== 'active'"
                   @click="loginAccount(acc.email)"
                   :disabled="actionDisabled || actionEmail === acc.email"
                   class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
@@ -79,7 +112,7 @@
                   {{ actionEmail === acc.email && actionType === 'login' ? '登录中...' : '登录' }}
                 </button>
                 <button
-                  v-if="!acc.is_main_account && acc.status === 'active'"
+                  v-if="!acc.is_main_account && ['active', 'auth_pending', 'exhausted'].includes(acc.raw_status)"
                   @click="kickAccount(acc.email)"
                   :disabled="actionDisabled || actionEmail === acc.email"
                   class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
@@ -89,11 +122,27 @@
                   {{ actionEmail === acc.email && actionType === 'kick' ? '移出中...' : '移出' }}
                 </button>
                 <button
-                  v-if="acc.status === 'active' || acc.is_main_account"
+                  v-if="acc.raw_status === 'active' || acc.is_main_account"
                   @click="exportCodexAuth(acc.email)"
                   :disabled="actionEmail === acc.email"
                   class="px-3 py-1.5 rounded-lg text-xs font-medium border transition bg-cyan-600/10 text-cyan-400 border-cyan-500/30 hover:bg-cyan-600/20">
                   导出
+                </button>
+                <button
+                  v-if="!acc.is_main_account"
+                  @click="toggleAccountDisabled(acc)"
+                  :disabled="actionDisabled || actionEmail === acc.email"
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
+                  :class="actionDisabled || actionEmail === acc.email
+                    ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+                    : acc.disabled
+                      ? 'bg-emerald-600/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-600/20'
+                      : 'bg-fuchsia-600/10 text-fuchsia-400 border-fuchsia-500/30 hover:bg-fuchsia-600/20'">
+                  {{
+                    actionEmail === acc.email && actionType === (acc.disabled ? 'enable' : 'disable')
+                      ? (acc.disabled ? '启用中...' : '禁用中...')
+                      : (acc.disabled ? '启用' : '禁用')
+                  }}
                 </button>
                 <button
                   v-if="!acc.is_main_account"
@@ -165,7 +214,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { api } from '../api.js'
 
 const props = defineProps({
@@ -183,14 +232,22 @@ const actionEmail = ref('')
 const actionType = ref('')
 const syncing = ref(false)
 const resetting = ref(false)
+const bulkUpdating = ref(false)
 const message = ref('')
 const exportData = ref(null)
 const copied = ref(false)
 const messageClass = ref('')
+const selectedEmails = ref([])
 const adminReady = computed(() => !!props.adminStatus?.configured)
-const actionDisabled = computed(() => !!props.runningTask || !adminReady.value)
+const actionDisabled = computed(() => !!props.runningTask || !adminReady.value || bulkUpdating.value)
 const syncDisabled = computed(() => syncing.value || actionDisabled.value)
 const resetDisabled = computed(() => resetting.value || !!props.runningTask)
+const selectableAccounts = computed(() => (props.status?.accounts || []).filter(isBulkSelectable))
+const selectedDisableTargets = computed(() => selectableAccounts.value.filter(acc => selectedEmails.value.includes(acc.email) && !acc.disabled))
+const selectedEnableTargets = computed(() => selectableAccounts.value.filter(acc => selectedEmails.value.includes(acc.email) && acc.disabled))
+const allSelectableSelected = computed(() => !!selectableAccounts.value.length && selectedEmails.value.length === selectableAccounts.value.length)
+const bulkDisableDisabled = computed(() => actionDisabled.value || !selectedDisableTargets.value.length)
+const bulkEnableDisabled = computed(() => actionDisabled.value || !selectedEnableTargets.value.length)
 
 const cards = computed(() => {
   if (!props.status) return []
@@ -200,6 +257,7 @@ const cards = computed(() => {
     { label: '待修复', value: s.auth_pending || 0, color: 'text-cyan-400' },
     { label: '待命', value: s.standby, color: 'text-yellow-400' },
     { label: '额度用完', value: s.exhausted, color: 'text-red-400' },
+    { label: '禁用', value: s.disabled || 0, color: 'text-fuchsia-400' },
     { label: '总计', value: s.total, color: 'text-white' },
   ]
 })
@@ -210,6 +268,7 @@ function statusClass(s) {
     auth_pending: 'bg-cyan-500/10 text-cyan-400',
     exhausted: 'bg-red-500/10 text-red-400',
     standby: 'bg-yellow-500/10 text-yellow-400',
+    disabled: 'bg-fuchsia-500/10 text-fuchsia-400',
     pending: 'bg-gray-500/10 text-gray-400',
   }[s] || 'bg-gray-500/10 text-gray-400'
 }
@@ -220,6 +279,7 @@ function dotClass(s) {
     auth_pending: 'bg-cyan-400',
     exhausted: 'bg-red-400',
     standby: 'bg-yellow-400',
+    disabled: 'bg-fuchsia-400',
     pending: 'bg-gray-400',
   }[s] || 'bg-gray-400'
 }
@@ -230,9 +290,42 @@ function statusLabel(s) {
     auth_pending: 'Auth pending',
     exhausted: 'Used up',
     standby: 'Standby',
+    disabled: 'Disabled',
     pending: 'Pending',
   }[s] || s
 }
+
+function isBulkSelectable(acc) {
+  return !!acc && !acc.is_main_account
+}
+
+function isSelected(email) {
+  return selectedEmails.value.includes(email)
+}
+
+function toggleAccountSelected(email, checked) {
+  if (!email) return
+  if (checked) {
+    if (!selectedEmails.value.includes(email)) {
+      selectedEmails.value = [...selectedEmails.value, email]
+    }
+    return
+  }
+  selectedEmails.value = selectedEmails.value.filter(item => item !== email)
+}
+
+function toggleSelectAll(checked) {
+  selectedEmails.value = checked ? selectableAccounts.value.map(acc => acc.email) : []
+}
+
+watch(
+  () => props.status?.accounts,
+  (accounts) => {
+    const allowed = new Set((accounts || []).filter(isBulkSelectable).map(acc => acc.email))
+    selectedEmails.value = selectedEmails.value.filter(email => allowed.has(email))
+  },
+  { immediate: true },
+)
 
 function quota(acc, type) {
   const qi = props.status?.quota_cache?.[acc.email] || acc.last_quota
@@ -390,6 +483,89 @@ async function kickAccount(email) {
   } finally {
     actionEmail.value = ''
     actionType.value = ''
+    setTimeout(() => { message.value = '' }, 8000)
+  }
+}
+
+async function toggleAccountDisabled(acc) {
+  if (actionDisabled.value) return
+
+  const disabling = !acc.disabled
+  const ok = window.confirm(
+    disabling
+      ? `确认禁用账号 ${acc.email}？\n禁用后自动巡检、轮转和远端同步都会跳过该账号。`
+      : `确认启用账号 ${acc.email}？\n启用后该账号会重新参与自动巡检、轮转和远端同步。`
+  )
+  if (!ok) return
+
+  actionEmail.value = acc.email
+  actionType.value = disabling ? 'disable' : 'enable'
+  message.value = ''
+  try {
+    const result = disabling
+      ? await api.disableAccount(acc.email)
+      : await api.enableAccount(acc.email)
+    message.value = result.message || `${disabling ? '已禁用' : '已启用'} ${acc.email}`
+    messageClass.value = 'bg-green-500/10 text-green-400 border-green-500/20'
+    emit('refresh')
+  } catch (e) {
+    message.value = e.message
+    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
+  } finally {
+    actionEmail.value = ''
+    actionType.value = ''
+    setTimeout(() => { message.value = '' }, 8000)
+  }
+}
+
+async function bulkDisableSelected() {
+  if (bulkDisableDisabled.value) return
+
+  const emails = selectedDisableTargets.value.map(acc => acc.email)
+  const ok = window.confirm(
+    `确认批量禁用这 ${emails.length} 个账号吗？\n禁用后自动巡检、轮转和远端同步都会跳过它们。`
+  )
+  if (!ok) return
+
+  bulkUpdating.value = true
+  message.value = ''
+  try {
+    const result = await api.bulkDisableAccounts(emails)
+    message.value = result.message || `已禁用 ${emails.length} 个账号`
+    messageClass.value = 'bg-green-500/10 text-green-400 border-green-500/20'
+    selectedEmails.value = []
+    emit('refresh')
+  } catch (e) {
+    message.value = e.message
+    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
+  } finally {
+    bulkUpdating.value = false
+    setTimeout(() => { message.value = '' }, 8000)
+  }
+}
+
+async function bulkEnableSelected() {
+  if (bulkEnableDisabled.value) return
+
+  const emails = selectedEnableTargets.value.map(acc => acc.email)
+  const ok = window.confirm(
+    `确认批量启用这 ${emails.length} 个账号吗？\n启用后它们会重新参与自动巡检、轮转和远端同步。`
+  )
+  if (!ok) return
+
+  bulkUpdating.value = true
+  message.value = ''
+  try {
+    const result = await api.bulkEnableAccounts(emails)
+    message.value = result.message || `已启用 ${emails.length} 个账号`
+    messageClass.value = 'bg-green-500/10 text-green-400 border-green-500/20'
+    selectedEmails.value = []
+    emit('refresh')
+  } catch (e) {
+    message.value = e.message
+    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
+  } finally {
+    bulkUpdating.value = false
     setTimeout(() => { message.value = '' }, 8000)
   }
 }

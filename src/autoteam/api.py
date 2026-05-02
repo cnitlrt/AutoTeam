@@ -1127,8 +1127,12 @@ def _resolve_status_auth_file(acc: dict) -> str:
 
 
 def _display_account_status(acc: dict, quota_snapshot: dict | None = None) -> str:
+    from autoteam.accounts import is_account_disabled
+
     status = acc.get("status", "")
     if not _is_main_account_email(acc.get("email")):
+        if is_account_disabled(acc):
+            return "disabled"
         return status
 
     quota_status = _quota_snapshot_status(quota_snapshot) or _quota_snapshot_status(acc.get("last_quota"))
@@ -1142,6 +1146,7 @@ def _sanitize_account(acc: dict, quota_snapshot: dict | None = None) -> dict:
     """脱敏账号信息（去掉 password 等敏感字段）"""
     sanitized = {k: v for k, v in acc.items() if k not in ("password", "cloudmail_account_id", "mail_account_id")}
     sanitized["is_main_account"] = _is_main_account_email(acc.get("email"))
+    sanitized["raw_status"] = acc.get("status", "")
     sanitized["status"] = _display_account_status(acc, quota_snapshot)
     return sanitized
 
@@ -1885,6 +1890,119 @@ def delete_account(email: str):
         _playwright_lock.release()
 
 
+def _toggle_account_disabled(email: str, disabled: bool):
+    from autoteam.accounts import find_account, load_accounts, update_account
+
+    email = email.strip().lower()
+    if _is_main_account_email(email):
+        raise HTTPException(status_code=400, detail="主号不允许禁用或启用")
+
+    accounts = load_accounts()
+    acc = find_account(accounts, email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    update_account(email, disabled=disabled)
+    refreshed = find_account(load_accounts(), email)
+    return {
+        "message": f"已{'禁用' if disabled else '启用'} {email}",
+        "email": email,
+        "disabled": bool(disabled),
+        "account": _sanitize_account(refreshed or {**acc, "disabled": disabled}),
+    }
+
+
+def _toggle_accounts_disabled(emails: list[str], disabled: bool):
+    from autoteam.accounts import load_accounts, save_accounts
+
+    normalized_emails = []
+    seen = set()
+    for value in emails or []:
+        email = _normalized_email(value)
+        if not email or email in seen:
+            continue
+        seen.add(email)
+        normalized_emails.append(email)
+
+    if not normalized_emails:
+        raise HTTPException(status_code=400, detail="请至少提供一个有效邮箱")
+
+    accounts = load_accounts()
+    by_email = {(_normalized_email(acc.get("email"))): acc for acc in accounts if acc.get("email")}
+
+    updated = []
+    unchanged = []
+    missing = []
+    skipped_main = []
+
+    for email in normalized_emails:
+        if _is_main_account_email(email):
+            skipped_main.append(email)
+            continue
+        acc = by_email.get(email)
+        if not acc:
+            missing.append(email)
+            continue
+        if bool(acc.get("disabled", False)) == bool(disabled):
+            unchanged.append(email)
+            continue
+        acc["disabled"] = bool(disabled)
+        updated.append(email)
+
+    if updated:
+        save_accounts(accounts)
+        accounts = load_accounts()
+        by_email = {(_normalized_email(acc.get("email"))): acc for acc in accounts if acc.get("email")}
+
+    action = "禁用" if disabled else "启用"
+    parts = [f"已{action} {len(updated)} 个账号"]
+    if unchanged:
+        parts.append(f"{len(unchanged)} 个已是目标状态")
+    if skipped_main:
+        parts.append(f"跳过主号 {len(skipped_main)} 个")
+    if missing:
+        parts.append(f"未找到 {len(missing)} 个")
+
+    return {
+        "message": "，".join(parts),
+        "disabled": bool(disabled),
+        "updated_count": len(updated),
+        "updated_emails": updated,
+        "unchanged_emails": unchanged,
+        "skipped_main_accounts": skipped_main,
+        "missing_emails": missing,
+        "accounts": [_sanitize_account(by_email[email]) for email in updated if email in by_email],
+    }
+
+
+class BulkAccountDisableParams(BaseModel):
+    emails: list[str]
+
+
+@app.post("/api/accounts/bulk/disable")
+def post_bulk_disable_accounts(params: BulkAccountDisableParams):
+    """批量禁用账号：保留本地记录，但自动轮转/巡检/同步会跳过这些账号。"""
+    return _toggle_accounts_disabled(params.emails, True)
+
+
+@app.post("/api/accounts/bulk/enable")
+def post_bulk_enable_accounts(params: BulkAccountDisableParams):
+    """批量启用账号：恢复这些账号参与自动轮转/巡检/同步。"""
+    return _toggle_accounts_disabled(params.emails, False)
+
+
+@app.post("/api/accounts/{email}/disable")
+def post_disable_account(email: str):
+    """禁用账号：保留本地记录，但自动轮转/巡检/同步会跳过该账号。"""
+    return _toggle_account_disabled(email, True)
+
+
+@app.post("/api/accounts/{email}/enable")
+def post_enable_account(email: str):
+    """启用账号：恢复参与自动轮转/巡检/同步。"""
+    return _toggle_account_disabled(email, False)
+
+
 @app.post("/api/accounts/{email}/kick")
 def post_kick_account(email: str):
     """将账号从 Team 中移出，状态变为 standby"""
@@ -1902,8 +2020,8 @@ def post_kick_account(email: str):
         acc = find_account(accounts, email)
         if not acc:
             raise HTTPException(status_code=404, detail="账号不存在")
-        if acc["status"] != "active":
-            raise HTTPException(status_code=400, detail=f"账号状态为 {acc['status']}，不是 active")
+        if acc["status"] not in ("active", "auth_pending", "exhausted"):
+            raise HTTPException(status_code=400, detail=f"账号状态为 {acc['status']}，当前不在 Team 占位状态")
 
         def _do_kick():
             return _run_with_chatgpt_session(lambda chatgpt: remove_from_team(chatgpt, email))
@@ -1995,6 +2113,7 @@ def get_status():
         STATUS_EXHAUSTED,
         STATUS_PENDING,
         STATUS_STANDBY,
+        is_account_disabled,
         load_accounts,
     )
     from autoteam.codex_auth import check_codex_quota, quota_result_quota_info
@@ -2003,6 +2122,8 @@ def get_status():
     quota_cache = {}
 
     for acc in accounts:
+        if not _is_main_account_email(acc.get("email")) and is_account_disabled(acc):
+            continue
         if acc["status"] not in (STATUS_ACTIVE, STATUS_AUTH_PENDING) and not _is_main_account_email(acc.get("email")):
             continue
 
@@ -2032,6 +2153,7 @@ def get_status():
         "standby": sum(1 for a in sanitized_accounts if a["status"] == STATUS_STANDBY),
         "exhausted": sum(1 for a in sanitized_accounts if a["status"] == STATUS_EXHAUSTED),
         "pending": sum(1 for a in sanitized_accounts if a["status"] == STATUS_PENDING),
+        "disabled": sum(1 for a in sanitized_accounts if a["status"] == "disabled"),
         "total": len(sanitized_accounts),
     }
 
@@ -2511,7 +2633,7 @@ def _auto_check_wait(interval_seconds, poll_seconds=0.2):
 
 def _auto_check_loop():
     """后台巡检线程：定期检查额度，多个账号低于阈值时自动轮转"""
-    from autoteam.accounts import STATUS_ACTIVE, STATUS_AUTH_PENDING, load_accounts
+    from autoteam.accounts import STATUS_ACTIVE, STATUS_AUTH_PENDING, is_account_disabled, load_accounts
     from autoteam.codex_auth import check_codex_quota
     from autoteam.manager import (
         _auth_repair_skip_reason,
@@ -2526,13 +2648,18 @@ def _auto_check_loop():
         }
         local_active_count = _count_pool_active_accounts(accounts, require_auth=True)
         auth_pending_accounts = [
-            a for a in accounts if a["status"] == STATUS_AUTH_PENDING and not _is_main_account_email(a.get("email"))
+            a
+            for a in accounts
+            if a["status"] == STATUS_AUTH_PENDING
+            and not _is_main_account_email(a.get("email"))
+            and not is_account_disabled(a)
         ]
         missing_auth_accounts = [
             a
             for a in accounts
             if a["status"] == STATUS_ACTIVE
             and not _is_main_account_email(a.get("email"))
+            and not is_account_disabled(a)
             and not (a.get("auth_file") and Path(a["auth_file"]).exists())
         ]
         active = [
@@ -2540,6 +2667,7 @@ def _auto_check_loop():
             for a in accounts
             if a["status"] == STATUS_ACTIVE
             and not _is_main_account_email(a.get("email"))
+            and not is_account_disabled(a)
             and a.get("auth_file")
             and Path(a["auth_file"]).exists()
         ]

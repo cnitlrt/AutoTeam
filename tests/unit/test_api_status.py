@@ -8,7 +8,7 @@ import time
 import pytest
 from fastapi import HTTPException
 
-from autoteam import api
+from autoteam import accounts, api
 
 
 def _set_pool_runtime_config(monkeypatch):
@@ -69,6 +69,7 @@ def test_get_status_normalizes_main_account_status_from_saved_auth(tmp_path, mon
         "standby": 0,
         "exhausted": 0,
         "pending": 0,
+        "disabled": 0,
         "total": 1,
     }
 
@@ -87,6 +88,170 @@ def test_sanitize_account_keeps_exportable_main_account_active_without_live_quot
 
     assert sanitized["is_main_account"] is True
     assert sanitized["status"] == "active"
+
+
+def test_sanitize_account_masks_disabled_non_main_status(monkeypatch):
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+
+    sanitized = api._sanitize_account({"email": "user@example.com", "status": "active", "disabled": True})
+
+    assert sanitized["raw_status"] == "active"
+    assert sanitized["status"] == "disabled"
+    assert sanitized["disabled"] is True
+
+
+def test_disable_and_enable_account_toggle_local_flag(tmp_path, monkeypatch):
+    accounts_file = tmp_path / "accounts.json"
+    monkeypatch.setattr(accounts, "ACCOUNTS_FILE", accounts_file)
+    monkeypatch.setattr(accounts, "get_admin_email", lambda: "owner@example.com")
+    monkeypatch.setattr(api, "_is_main_account_email", lambda email: email == "owner@example.com")
+
+    accounts.save_accounts(
+        [
+            {"email": "member@example.com", "status": "standby", "disabled": False},
+            {"email": "owner@example.com", "status": "active", "disabled": False},
+        ]
+    )
+
+    disabled_result = api.post_disable_account("member@example.com")
+    enabled_result = api.post_enable_account("member@example.com")
+
+    assert disabled_result["disabled"] is True
+    assert disabled_result["account"]["status"] == "disabled"
+    assert disabled_result["account"]["raw_status"] == "standby"
+    assert enabled_result["disabled"] is False
+    assert enabled_result["account"]["status"] == "standby"
+    assert accounts.find_account(accounts.load_accounts(), "member@example.com")["disabled"] is False
+
+
+def test_bulk_disable_accounts_updates_multiple_rows_and_skips_non_targets(tmp_path, monkeypatch):
+    accounts_file = tmp_path / "accounts.json"
+    monkeypatch.setattr(accounts, "ACCOUNTS_FILE", accounts_file)
+    monkeypatch.setattr(accounts, "get_admin_email", lambda: "owner@example.com")
+    monkeypatch.setattr(api, "_is_main_account_email", lambda email: email == "owner@example.com")
+
+    accounts.save_accounts(
+        [
+            {"email": "first@example.com", "status": "standby", "disabled": False},
+            {"email": "second@example.com", "status": "active", "disabled": False},
+            {"email": "already@example.com", "status": "standby", "disabled": True},
+            {"email": "owner@example.com", "status": "active", "disabled": False},
+        ]
+    )
+
+    result = api.post_bulk_disable_accounts(
+        api.BulkAccountDisableParams(
+            emails=[
+                "first@example.com",
+                "second@example.com",
+                "already@example.com",
+                "owner@example.com",
+                "missing@example.com",
+                "first@example.com",
+            ]
+        )
+    )
+
+    stored = {acc["email"]: acc for acc in accounts.load_accounts()}
+
+    assert result["updated_count"] == 2
+    assert result["updated_emails"] == ["first@example.com", "second@example.com"]
+    assert result["unchanged_emails"] == ["already@example.com"]
+    assert result["skipped_main_accounts"] == ["owner@example.com"]
+    assert result["missing_emails"] == ["missing@example.com"]
+    assert stored["first@example.com"]["disabled"] is True
+    assert stored["second@example.com"]["disabled"] is True
+    assert stored["already@example.com"]["disabled"] is True
+    assert stored["owner@example.com"]["disabled"] is False
+
+
+def test_bulk_enable_accounts_updates_disabled_rows_only(tmp_path, monkeypatch):
+    accounts_file = tmp_path / "accounts.json"
+    monkeypatch.setattr(accounts, "ACCOUNTS_FILE", accounts_file)
+    monkeypatch.setattr(accounts, "get_admin_email", lambda: "owner@example.com")
+    monkeypatch.setattr(api, "_is_main_account_email", lambda email: email == "owner@example.com")
+
+    accounts.save_accounts(
+        [
+            {"email": "first@example.com", "status": "standby", "disabled": True},
+            {"email": "second@example.com", "status": "active", "disabled": True},
+            {"email": "already@example.com", "status": "standby", "disabled": False},
+            {"email": "owner@example.com", "status": "active", "disabled": False},
+        ]
+    )
+
+    result = api.post_bulk_enable_accounts(
+        api.BulkAccountDisableParams(
+            emails=[
+                "first@example.com",
+                "second@example.com",
+                "already@example.com",
+                "owner@example.com",
+                "missing@example.com",
+            ]
+        )
+    )
+
+    stored = {acc["email"]: acc for acc in accounts.load_accounts()}
+
+    assert result["updated_count"] == 2
+    assert result["updated_emails"] == ["first@example.com", "second@example.com"]
+    assert result["unchanged_emails"] == ["already@example.com"]
+    assert result["skipped_main_accounts"] == ["owner@example.com"]
+    assert result["missing_emails"] == ["missing@example.com"]
+    assert stored["first@example.com"]["disabled"] is False
+    assert stored["second@example.com"]["disabled"] is False
+    assert stored["already@example.com"]["disabled"] is False
+    assert stored["owner@example.com"]["disabled"] is False
+
+
+def test_get_status_counts_disabled_and_skips_disabled_quota_checks(tmp_path, monkeypatch):
+    enabled_auth = tmp_path / "enabled.json"
+    disabled_auth = tmp_path / "disabled.json"
+    enabled_auth.write_text(json.dumps({"access_token": "token-enabled"}), encoding="utf-8")
+    disabled_auth.write_text(json.dumps({"access_token": "token-disabled"}), encoding="utf-8")
+
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {"email": "enabled@example.com", "status": "active", "auth_file": str(enabled_auth), "disabled": False},
+            {"email": "disabled@example.com", "status": "active", "auth_file": str(disabled_auth), "disabled": True},
+        ],
+    )
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+
+    seen_tokens = []
+
+    def fake_check_quota(access_token):
+        seen_tokens.append(access_token)
+        return (
+            "ok",
+            {
+                "primary_pct": 15,
+                "primary_resets_at": 1710000000,
+                "weekly_pct": 5,
+                "weekly_resets_at": 1710600000,
+            },
+        )
+
+    monkeypatch.setattr("autoteam.codex_auth.check_codex_quota", fake_check_quota)
+
+    result = api.get_status()
+
+    assert seen_tokens == ["token-enabled"]
+    assert {item["email"]: item["status"] for item in result["accounts"]} == {
+        "enabled@example.com": "active",
+        "disabled@example.com": "disabled",
+    }
+    assert result["summary"] == {
+        "active": 1,
+        "auth_pending": 0,
+        "standby": 0,
+        "exhausted": 0,
+        "pending": 0,
+        "disabled": 1,
+        "total": 2,
+    }
 
 
 def test_post_setup_save_only_requires_api_key_and_generates_one(monkeypatch):
@@ -1233,6 +1398,59 @@ def test_auto_check_does_not_rotate_when_team_is_full_but_no_local_repair_candid
     assert started == []
     assert sync_calls == [True]
     assert "Team 实际成员数已满足（5/5），但本地可用 active 仅 3/4，且未发现可自动修复的本地账号" in caplog.text
+
+
+def test_auto_check_ignores_disabled_auth_pending_accounts(tmp_path, monkeypatch, caplog):
+    auth_files = []
+    for idx in range(3):
+        auth_file = tmp_path / f"active-{idx}.json"
+        auth_file.write_text(json.dumps({"access_token": f"token-{idx}"}), encoding="utf-8")
+        auth_files.append(auth_file)
+
+    started = []
+
+    def fake_start_task(command, func, params, *args, **kwargs):
+        started.append((command, params, args, kwargs))
+
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2})
+    monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
+    monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
+    monkeypatch.setattr(api, "_maybe_reload_runtime_config_from_env_file", lambda *args, **kwargs: False)
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: (
+            [
+                {"email": f"active-{idx}@example.com", "status": "active", "auth_file": str(auth_files[idx])}
+                for idx in range(3)
+            ]
+            + [{"email": "disabled@example.com", "status": "auth_pending", "disabled": True, "auth_file": ""}]
+        ),
+    )
+    monkeypatch.setattr(
+        "autoteam.codex_auth.check_codex_quota",
+        lambda _token: ("ok", {"primary_pct": 10, "primary_resets_at": 1234567890, "weekly_pct": 1}),
+    )
+    monkeypatch.setattr(api, "_auto_check_team_member_count", lambda: 5)
+    monkeypatch.setattr("autoteam.accounts.update_account", lambda *args, **kwargs: None)
+    monkeypatch.setattr("autoteam.manager.sync_account_states", lambda: None)
+    monkeypatch.setattr(api, "_start_task", fake_start_task)
+
+    stop_event = api._auto_check_stop
+    wait_calls = {"count": 0}
+
+    def fake_wait(_seconds):
+        wait_calls["count"] += 1
+        return wait_calls["count"] > 1
+
+    monkeypatch.setattr(stop_event, "wait", fake_wait)
+
+    with caplog.at_level(logging.INFO):
+        api._auto_check_loop()
+
+    assert started == []
+    assert "待修复账号仍在冷却/暂停中" not in caplog.text
+    assert "未发现可自动修复的本地账号" in caplog.text
 
 
 def test_auto_check_resyncs_local_team_state_before_declaring_no_repair_candidate(tmp_path, monkeypatch):

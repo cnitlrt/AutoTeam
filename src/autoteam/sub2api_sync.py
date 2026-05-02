@@ -720,13 +720,15 @@ def verify_sub2api_connection() -> bool:
 
 
 def sync_to_sub2api():
-    from autoteam.accounts import STATUS_ACTIVE, load_accounts
+    from autoteam.accounts import STATUS_ACTIVE, is_account_disabled, load_accounts
 
     accounts = load_accounts()
     local_emails = {str(acc.get("email") or "").lower() for acc in accounts if acc.get("email")}
     active_targets = {}
 
     for acc in accounts:
+        if is_account_disabled(acc):
+            continue
         if acc.get("status") != STATUS_ACTIVE or not acc.get("auth_file"):
             continue
         auth_path = Path(acc["auth_file"])

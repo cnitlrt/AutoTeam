@@ -27,18 +27,32 @@ def _is_main_account_email(email):
     return bool(_normalized_email(email)) and _normalized_email(email) == _normalized_email(get_admin_email())
 
 
+def is_account_disabled(acc: dict | None) -> bool:
+    acc = acc or {}
+    return bool(acc.get("disabled", False))
+
+
+def _normalize_account(acc: dict) -> dict:
+    normalized = dict(acc or {})
+    normalized["disabled"] = bool(normalized.get("disabled", False))
+    return normalized
+
+
 def load_accounts():
     """加载账号列表"""
     if ACCOUNTS_FILE.exists():
         text = read_text(ACCOUNTS_FILE).strip()
         if text:
-            return json.loads(text)
+            data = json.loads(text)
+            if isinstance(data, list):
+                return [_normalize_account(acc) for acc in data if isinstance(acc, dict)]
     return []
 
 
 def save_accounts(accounts):
     """保存账号列表"""
-    write_text(ACCOUNTS_FILE, json.dumps(accounts, indent=2, ensure_ascii=False))
+    normalized = [_normalize_account(acc) for acc in accounts if isinstance(acc, dict)]
+    write_text(ACCOUNTS_FILE, json.dumps(normalized, indent=2, ensure_ascii=False))
 
 
 def find_account(accounts, email):
@@ -85,6 +99,7 @@ def add_account(email, password, cloudmail_account_id=None, *, mail_provider=Non
             "auth_last_failed_at": None,
             "auth_retry_after": None,
             "auth_retry_paused": False,
+            "disabled": False,
         }
     )
     save_accounts(accounts)
@@ -102,7 +117,11 @@ def update_account(email, **kwargs):
 
 def get_active_accounts():
     """获取所有活跃账号"""
-    return [a for a in load_accounts() if a["status"] == STATUS_ACTIVE and not _is_main_account_email(a.get("email"))]
+    return [
+        a
+        for a in load_accounts()
+        if a["status"] == STATUS_ACTIVE and not _is_main_account_email(a.get("email")) and not is_account_disabled(a)
+    ]
 
 
 def get_standby_accounts():
@@ -112,6 +131,8 @@ def get_standby_accounts():
     standby = []
     for a in accounts:
         if _is_main_account_email(a.get("email")):
+            continue
+        if is_account_disabled(a):
             continue
         if a["status"] == STATUS_STANDBY:
             resets_at = a.get("quota_resets_at")

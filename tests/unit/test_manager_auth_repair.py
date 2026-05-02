@@ -220,6 +220,32 @@ def test_login_codex_with_result_stops_immediately_on_hard_failure(monkeypatch):
     assert result["attempts"] == 1
 
 
+def test_cmd_check_skips_disabled_accounts(monkeypatch):
+    monkeypatch.setattr(
+        manager,
+        "load_accounts",
+        lambda: [
+            {"email": "pending@example.com", "status": "pending", "disabled": True},
+            {"email": "active@example.com", "status": "active", "disabled": True, "auth_file": "/tmp/a.json"},
+            {"email": "repair@example.com", "status": "auth_pending", "disabled": True, "auth_file": ""},
+        ],
+    )
+    monkeypatch.setattr(
+        manager,
+        "ChatGPTTeamAPI",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("disabled accounts should not trigger remote pending reconciliation")
+        ),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_check_and_refresh",
+        lambda _acc: (_ for _ in ()).throw(AssertionError("disabled accounts should not trigger quota checks")),
+    )
+
+    assert manager.cmd_check() == []
+
+
 def test_login_codex_with_result_rejects_non_team_bundle(monkeypatch):
     def fake_login(email, password, mail_client=None, return_result=False):
         assert return_result is True

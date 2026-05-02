@@ -444,6 +444,78 @@ def test_sync_to_sub2api_does_not_resolve_proxy_when_only_deleting_non_active_ac
     assert deleted == [(12, "删除非 active 账号")]
 
 
+def test_sync_to_sub2api_skips_disabled_local_accounts(monkeypatch, tmp_path):
+    monkeypatch.setattr(sub2api_sync, "_login", lambda: "token")
+    monkeypatch.setattr(sub2api_sync, "_resolve_group_binding", lambda token: ([], []))
+    monkeypatch.setattr(sub2api_sync, "_list_openai_oauth_accounts", lambda token: [])
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_dedupe_managed_accounts",
+        lambda token, items, *, kind: (
+            {
+                "disabled@example.com": {
+                    "id": 12,
+                    "status": "active",
+                    "credentials": {"email": "disabled@example.com"},
+                    "extra": {},
+                    "group_ids": [],
+                }
+            },
+            0,
+        ),
+    )
+
+    enabled_auth = tmp_path / "codex-enabled@example.com-team-a.json"
+    disabled_auth = tmp_path / "codex-disabled@example.com-team-b.json"
+    enabled_auth.write_text("{}", encoding="utf-8")
+    disabled_auth.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {"email": "enabled@example.com", "status": "active", "auth_file": str(enabled_auth), "disabled": False},
+            {"email": "disabled@example.com", "status": "active", "auth_file": str(disabled_auth), "disabled": True},
+        ],
+    )
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_load_auth_data",
+        lambda path: {
+            "email": "enabled@example.com" if "enabled@" in str(path) else "disabled@example.com",
+            "access_token": "at-1",
+            "refresh_token": "rt-1",
+        },
+    )
+
+    created = []
+    updated = []
+    deleted = []
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_create_account",
+        lambda token, **kwargs: created.append(kwargs["name"]) or {"id": 99},
+    )
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_update_account",
+        lambda token, account, **kwargs: updated.append(account["id"]) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_delete_account",
+        lambda token, account, **kwargs: deleted.append(account["id"]) or {"ok": True},
+    )
+
+    result = sub2api_sync.sync_to_sub2api()
+
+    assert result["created"] == 1
+    assert result["updated"] == 0
+    assert result["deleted"] == 1
+    assert created == ["enabled@example.com"]
+    assert updated == []
+    assert deleted == [12]
+
+
 def test_sync_to_sub2api_resolves_proxy_name_for_new_pool_accounts(monkeypatch, tmp_path):
     monkeypatch.setattr(sub2api_sync, "SUB2API_PROXY", "Residential Pool")
     monkeypatch.setattr(sub2api_sync, "_login", lambda: "token")

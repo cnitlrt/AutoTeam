@@ -36,6 +36,7 @@ from autoteam.accounts import (
     add_account,
     find_account,
     get_standby_accounts,
+    is_account_disabled,
     load_accounts,
     save_accounts,
     update_account,
@@ -164,7 +165,7 @@ def _count_pool_active_accounts(accounts: list[dict] | None = None, *, require_a
     accounts = accounts if accounts is not None else load_accounts()
     count = 0
     for acc in accounts:
-        if _is_main_account_email(acc.get("email")) or acc.get("status") != STATUS_ACTIVE:
+        if _is_main_account_email(acc.get("email")) or is_account_disabled(acc) or acc.get("status") != STATUS_ACTIVE:
             continue
         if require_auth and not _has_auth_file(acc):
             continue
@@ -588,10 +589,17 @@ def sync_account_states(chatgpt_api=None):
         if in_team:
             if acc["status"] == STATUS_EXHAUSTED:
                 continue
+            desired_status = STATUS_ACTIVE if _has_auth_file(acc) else STATUS_AUTH_PENDING
+            if is_account_disabled(acc):
+                if acc["status"] in (STATUS_ACTIVE, STATUS_AUTH_PENDING):
+                    continue
+                if acc["status"] != desired_status:
+                    acc["status"] = desired_status
+                    changed = True
+                continue
             if acc["status"] == STATUS_AUTH_PENDING:
                 continue
 
-            desired_status = STATUS_ACTIVE if _has_auth_file(acc) else STATUS_AUTH_PENDING
             if acc["status"] != desired_status:
                 acc["status"] = desired_status
                 changed = True
@@ -700,12 +708,13 @@ def _print_status_table(accounts, quota_cache=None):
         STATUS_EXHAUSTED: ("bold red", "✗ used up"),
         STATUS_STANDBY: ("yellow", "○ standby"),
         STATUS_PENDING: ("dim", "… pending"),
+        "disabled": ("bold magenta", "◌ disabled"),
     }
 
     for idx, acc in enumerate(accounts, 1):
         email = acc["email"]
         qi = quota_cache.get(email) or acc.get("last_quota")
-        status = acc["status"]
+        status = "disabled" if not _is_main_account_email(email) and is_account_disabled(acc) else acc["status"]
 
         style, status_label = STATUS_STYLE.get(status, ("dim", status))
         status_text = Text(status_label, style=style)
@@ -745,15 +754,17 @@ def _print_status_table(accounts, quota_cache=None):
     console.print(table)
 
     # 统计摘要
-    active = sum(1 for a in accounts if a["status"] == STATUS_ACTIVE)
-    auth_pending = sum(1 for a in accounts if a["status"] == STATUS_AUTH_PENDING)
-    standby = sum(1 for a in accounts if a["status"] == STATUS_STANDBY)
-    exhausted = sum(1 for a in accounts if a["status"] == STATUS_EXHAUSTED)
+    active = sum(1 for a in accounts if not is_account_disabled(a) and a["status"] == STATUS_ACTIVE)
+    auth_pending = sum(1 for a in accounts if not is_account_disabled(a) and a["status"] == STATUS_AUTH_PENDING)
+    standby = sum(1 for a in accounts if not is_account_disabled(a) and a["status"] == STATUS_STANDBY)
+    exhausted = sum(1 for a in accounts if not is_account_disabled(a) and a["status"] == STATUS_EXHAUSTED)
+    disabled = sum(1 for a in accounts if not _is_main_account_email(a.get("email")) and is_account_disabled(a))
     console.print(
         f"  [green]● 活跃 {active}[/]  "
         f"[cyan]◐ 认证待修复 {auth_pending}[/]  "
         f"[yellow]○ 待命 {standby}[/]  "
         f"[red]✗ 用完 {exhausted}[/]  "
+        f"[magenta]◌ 禁用 {disabled}[/]  "
         f"[dim]总计 {len(accounts)}[/]",
     )
 
@@ -841,7 +852,7 @@ def cmd_check(force_auth_repair=False, preserve_low_active=False, preserved_low_
 
     accounts = load_accounts()
 
-    pending_accounts = [a for a in accounts if a["status"] == STATUS_PENDING]
+    pending_accounts = [a for a in accounts if a["status"] == STATUS_PENDING and not is_account_disabled(a)]
     if pending_accounts:
         logger.info("[检查] 对账 %d 个 pending 账号...", len(pending_accounts))
         chatgpt = None
@@ -897,8 +908,13 @@ def cmd_check(force_auth_repair=False, preserve_low_active=False, preserved_low_
 
     all_active = [a for a in accounts if a["status"] == STATUS_ACTIVE and not _is_main_account_email(a.get("email"))]
     auth_pending_accounts = [
-        a for a in accounts if a["status"] == STATUS_AUTH_PENDING and not _is_main_account_email(a.get("email"))
+        a
+        for a in accounts
+        if a["status"] == STATUS_AUTH_PENDING
+        and not _is_main_account_email(a.get("email"))
+        and not is_account_disabled(a)
     ]
+    all_active = [a for a in all_active if not is_account_disabled(a)]
 
     # 区分：有认证文件的 vs 无认证文件的
     active_with_auth = []
@@ -2256,7 +2272,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
 
     def managed_account_ready(email):
         acc = find_account(load_accounts(), email)
-        return bool(acc and acc.get("status") == STATUS_ACTIVE and _has_auth_file(acc))
+        return bool(acc and not is_account_disabled(acc) and acc.get("status") == STATUS_ACTIVE and _has_auth_file(acc))
 
     def remove_team_member_to_standby(email, stage_label):
         if not _chatgpt_session_ready(chatgpt):
@@ -2276,6 +2292,10 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
     def evaluate_standby_reuse(acc, stage_label):
         email = acc["email"]
         auth_file = acc.get("auth_file")
+
+        if is_account_disabled(acc):
+            logger.info("%s 跳过 %s（账号已禁用）", stage_label, email)
+            return "disabled"
 
         skip_reason = _auto_reuse_skip_reason(acc)
         if skip_reason:
@@ -2346,6 +2366,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
             a
             for a in get_standby_accounts()
             if not _is_main_account_email(a.get("email"))
+            and not is_account_disabled(a)
             and _normalized_email(a.get("email")) != _normalized_email(old_email)
         ]
 
@@ -2425,7 +2446,11 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
         # 移出所有 exhausted 账号（包括之前已标记的）
         all_accounts = load_accounts()
         all_exhausted = [
-            a for a in all_accounts if a["status"] == STATUS_EXHAUSTED and not _is_main_account_email(a.get("email"))
+            a
+            for a in all_accounts
+            if a["status"] == STATUS_EXHAUSTED
+            and not _is_main_account_email(a.get("email"))
+            and not is_account_disabled(a)
         ]
         initial_api_count = -1
         removed_now = 0
@@ -2497,6 +2522,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
                     for a in all_accs
                     if a["status"] in (STATUS_ACTIVE, STATUS_AUTH_PENDING, STATUS_EXHAUSTED)
                     and not _is_main_account_email(a.get("email"))
+                    and not is_account_disabled(a)
                 ]
                 local_seat_accounts.sort(
                     key=lambda a: (
@@ -2539,7 +2565,11 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
 
         # 优先复用旧账号（先验证额度是否真的恢复了）
         filled = 0
-        standby_list = [a for a in get_standby_accounts() if not _is_main_account_email(a.get("email"))]
+        standby_list = [
+            a
+            for a in get_standby_accounts()
+            if not _is_main_account_email(a.get("email")) and not is_account_disabled(a)
+        ]
         quota_skipped = []
         auto_reuse_skipped = []
         retry_throttled = []
@@ -2921,7 +2951,7 @@ def cmd_fill(target=5):
         standby_list = [
             a
             for a in get_standby_accounts()
-            if a.get("_quota_recovered") and not _is_main_account_email(a.get("email"))
+            if a.get("_quota_recovered") and not _is_main_account_email(a.get("email")) and not is_account_disabled(a)
         ]
         standby_index = 0
 
@@ -3037,7 +3067,7 @@ def cmd_cleanup(max_seats=None):
 
         # 从本地管理的账号中选择要移除的（优先移除额度已用完的）
         removable = sorted(
-            local_members,
+            [m for m in local_members if not is_account_disabled(find_account(accounts, m.get("email", "")) or {})],
             key=lambda m: (
                 # 额度用完的优先移除
                 0

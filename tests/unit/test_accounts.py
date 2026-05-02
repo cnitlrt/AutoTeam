@@ -17,6 +17,7 @@ def test_add_and_update_account_persists_data(tmp_path, monkeypatch):
     assert created[0]["mail_account_id"] == 123
     assert created[0]["mail_provider"] == "cloudmail"
     assert created[0]["status"] == accounts.STATUS_PENDING
+    assert created[0]["disabled"] is False
 
     updated = accounts.update_account("user@example.com", status=accounts.STATUS_ACTIVE, auth_file="auth.json")
 
@@ -34,6 +35,7 @@ def test_get_active_accounts_excludes_main_account(tmp_path, monkeypatch):
         [
             {"email": "owner@example.com", "status": accounts.STATUS_ACTIVE},
             {"email": "member@example.com", "status": accounts.STATUS_ACTIVE},
+            {"email": "disabled@example.com", "status": accounts.STATUS_ACTIVE, "disabled": True},
             {"email": "standby@example.com", "status": accounts.STATUS_STANDBY},
         ]
     )
@@ -75,6 +77,13 @@ def test_get_standby_accounts_orders_recovered_first_and_skips_main_account(tmp_
                 "quota_resets_at": None,
                 "quota_exhausted_at": None,
             },
+            {
+                "email": "disabled@example.com",
+                "status": accounts.STATUS_STANDBY,
+                "quota_resets_at": None,
+                "quota_exhausted_at": None,
+                "disabled": True,
+            },
         ]
     )
 
@@ -89,3 +98,18 @@ def test_get_standby_accounts_orders_recovered_first_and_skips_main_account(tmp_
     assert standby[1]["_quota_recovered"] is True
     assert standby[2]["_quota_recovered"] is False
     assert accounts.get_next_reusable_account()["email"] == "always@example.com"
+
+
+def test_load_accounts_normalizes_disabled_field(tmp_path, monkeypatch):
+    accounts_file = tmp_path / "accounts.json"
+    monkeypatch.setattr(accounts, "ACCOUNTS_FILE", accounts_file)
+
+    accounts_file.write_text(
+        '[{"email":"legacy@example.com","status":"standby"},{"email":"off@example.com","status":"active","disabled":1}]',
+        encoding="utf-8",
+    )
+
+    loaded = accounts.load_accounts()
+
+    assert loaded[0]["disabled"] is False
+    assert loaded[1]["disabled"] is True

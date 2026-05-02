@@ -523,7 +523,7 @@ def sync_to_cpa():
     - active 且 CPA 没有 → 上传
     - CPA 有但不是 active（或本地已删除）→ 从 CPA 删除
     """
-    from autoteam.accounts import STATUS_ACTIVE, load_accounts, save_accounts
+    from autoteam.accounts import STATUS_ACTIVE, is_account_disabled, load_accounts, save_accounts
 
     accounts = load_accounts()
     local_emails = {a["email"].lower() for a in accounts}
@@ -546,6 +546,8 @@ def sync_to_cpa():
     # active 账号的认证文件
     active_files = {}
     for acc in accounts:
+        if is_account_disabled(acc):
+            continue
         if acc["status"] == STATUS_ACTIVE and acc.get("auth_file"):
             path = Path(acc["auth_file"])
             if path.exists():
