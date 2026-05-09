@@ -2360,7 +2360,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
 
         candidate = min(low_candidates, key=lambda item: item.get("remaining", 101))
         old_email = candidate["email"]
-        logger.info("[4/5] seat=2 且检测到低额度子号，尝试先预切换再移除旧号: %s", old_email)
+        logger.info("[4/5] seat=2 且检测到需要切换的子号，尝试先预切换再移除旧号: %s", old_email)
 
         standby_list = [
             a
@@ -2455,11 +2455,51 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
         initial_api_count = -1
         removed_now = 0
         already_absent_count = 0
+        preswitch_attempted = False
+        preswitch_result = {"attempted": False}
+
+        if TARGET == 2 and all_exhausted:
+            ensure_chatgpt()
+            initial_api_count = get_team_member_count(chatgpt)
+            preswitch_candidates = list(preserved_low_accounts or [])
+            seen_preswitch_emails = {
+                _normalized_email(item.get("email"))
+                for item in preswitch_candidates
+                if _normalized_email(item.get("email"))
+            }
+            for acc in all_exhausted:
+                email = _normalized_email(acc.get("email"))
+                if not email or email in seen_preswitch_emails:
+                    continue
+                quota_info = acc.get("last_quota") if isinstance(acc.get("last_quota"), dict) else {}
+                remaining = max(0, 100 - int((quota_info or {}).get("primary_pct", 100) or 100))
+                preswitch_candidates.append(
+                    {
+                        "email": acc["email"],
+                        "remaining": remaining,
+                        "quota": quota_info,
+                    }
+                )
+                seen_preswitch_emails.add(email)
+
+            if initial_api_count == TARGET and preswitch_candidates:
+                logger.info("[3/5] seat=2 检测到额度用完账号，优先尝试预切换...")
+                preswitch_result = attempt_seat2_preswitch(preswitch_candidates, initial_api_count)
+                preswitch_attempted = bool(preswitch_result.get("attempted"))
+                all_accounts = load_accounts()
+                all_exhausted = [
+                    a
+                    for a in all_accounts
+                    if a["status"] == STATUS_EXHAUSTED
+                    and not _is_main_account_email(a.get("email"))
+                    and not is_account_disabled(a)
+                ]
 
         if all_exhausted:
             logger.info("[3/5] 移出 %d 个额度用完的账号...", len(all_exhausted))
             ensure_chatgpt()
-            initial_api_count = get_team_member_count(chatgpt)
+            if initial_api_count < 0 or not preswitch_attempted:
+                initial_api_count = get_team_member_count(chatgpt)
             for acc in all_exhausted:
                 email = acc["email"]
                 if not _chatgpt_session_ready(chatgpt):
@@ -2475,32 +2515,36 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
                         logger.info("[3/5] %s → standby（远端已不存在）", email)
         else:
             logger.info("[3/5] 无需移出账号")
-        if not _chatgpt_session_ready(chatgpt):
-            ensure_chatgpt()
-        api_count = get_team_member_count(chatgpt)
-        logger.info(
-            "[4/5] API 返回成员数: %d（实际移出: %d，远端已缺席: %d）",
-            api_count,
-            removed_now,
-            already_absent_count,
-        )
-        if api_count <= 0:
-            local_estimated = _estimate_local_team_member_count(TARGET, load_accounts())
-            logger.warning("[4/5] API 成员数异常 (%d)，使用本地 Team 占位估算: %d", api_count, local_estimated)
-            current_count = local_estimated
+        if preswitch_result.get("attempted") and not all_exhausted:
+            current_count = int(preswitch_result.get("current_count", TARGET))
+            logger.info("[4/5] seat=2 预切换后当前成员数: %d/%d", current_count, TARGET)
         else:
-            # 保守估算当前成员数：
-            # - api_count 是移除后的最新观察值
-            # - initial_api_count - removed_now 是基于移除前人数的理论下界
-            # 若远端成员本就不存在（already_absent），不能再从 api_count 里额外扣减，否则会少算人数。
-            estimates = [api_count]
-            if initial_api_count > 0 and removed_now > 0:
-                estimates.append(max(0, initial_api_count - removed_now))
-            current_count = min(estimates)
-            if len(estimates) > 1 and current_count != api_count:
-                logger.info(
-                    "[4/5] 成员数保守估算: %d（初始=%d，移出=%d）", current_count, initial_api_count, removed_now
-                )
+            if not _chatgpt_session_ready(chatgpt):
+                ensure_chatgpt()
+            api_count = get_team_member_count(chatgpt)
+            logger.info(
+                "[4/5] API 返回成员数: %d（实际移出: %d，远端已缺席: %d）",
+                api_count,
+                removed_now,
+                already_absent_count,
+            )
+            if api_count <= 0:
+                local_estimated = _estimate_local_team_member_count(TARGET, load_accounts())
+                logger.warning("[4/5] API 成员数异常 (%d)，使用本地 Team 占位估算: %d", api_count, local_estimated)
+                current_count = local_estimated
+            else:
+                # 保守估算当前成员数：
+                # - api_count 是移除后的最新观察值
+                # - initial_api_count - removed_now 是基于移除前人数的理论下界
+                # 若远端成员本就不存在（already_absent），不能再从 api_count 里额外扣减，否则会少算人数。
+                estimates = [api_count]
+                if initial_api_count > 0 and removed_now > 0:
+                    estimates.append(max(0, initial_api_count - removed_now))
+                current_count = min(estimates)
+                if len(estimates) > 1 and current_count != api_count:
+                    logger.info(
+                        "[4/5] 成员数保守估算: %d（初始=%d，移出=%d）", current_count, initial_api_count, removed_now
+                    )
         vacancies = TARGET - current_count
 
         if vacancies <= 0 and TARGET == 2 and current_count == TARGET and preserved_low_accounts:
