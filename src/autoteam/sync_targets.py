@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping
 
 from autoteam.textio import parse_env_value
+
+logger = logging.getLogger(__name__)
 
 SYNC_TARGET_CPA = "cpa"
 SYNC_TARGET_SUB2API = "sub2api"
@@ -74,6 +77,10 @@ def get_available_sync_targets(env: Mapping[str, object] | None = None) -> list[
     values = _normalize_env(env)
     available = []
     for target, meta in _SYNC_TARGET_META.items():
+        toggle_key = str(meta["toggle_key"])
+        raw_toggle = (values.get(toggle_key) or "").strip()
+        if raw_toggle and not parse_bool_env(raw_toggle):
+            continue
         if all((values.get(key) or "").strip() for key in tuple(meta["config_keys"])):
             available.append(target)
     return available
@@ -152,12 +159,20 @@ def delete_main_codex_from_configured_targets(*, include_disabled: bool = False)
     if SYNC_TARGET_CPA in targets:
         from autoteam.cpa_sync import delete_main_codex_from_cpa
 
-        results[SYNC_TARGET_CPA] = delete_main_codex_from_cpa()
+        try:
+            results[SYNC_TARGET_CPA] = delete_main_codex_from_cpa()
+        except Exception as exc:
+            logger.warning("[CPA] 删除主号失败: %s", exc)
+            results[SYNC_TARGET_CPA] = {"deleted": [], "count": 0, "error": str(exc)}
 
     if SYNC_TARGET_SUB2API in targets:
         from autoteam.sub2api_sync import delete_main_codex_from_sub2api
 
-        results[SYNC_TARGET_SUB2API] = delete_main_codex_from_sub2api()
+        try:
+            results[SYNC_TARGET_SUB2API] = delete_main_codex_from_sub2api()
+        except Exception as exc:
+            logger.warning("[Sub2API] 删除主号失败: %s", exc)
+            results[SYNC_TARGET_SUB2API] = {"deleted": [], "count": 0, "error": str(exc)}
 
     return results
 
@@ -171,19 +186,27 @@ def delete_account_from_configured_targets(
     if SYNC_TARGET_CPA in targets:
         from autoteam.cpa_sync import delete_from_cpa, list_cpa_files
 
-        deleted = []
-        auth_name_set = set(auth_names or [])
-        for item in list_cpa_files():
-            item_email = (item.get("email") or "").lower()
-            item_name = item.get("name") or ""
-            if item_email == email.lower() or item_name in auth_name_set:
-                if delete_from_cpa(item_name):
-                    deleted.append(item_name)
-        results[SYNC_TARGET_CPA] = {"deleted": deleted, "count": len(deleted)}
+        try:
+            deleted = []
+            auth_name_set = set(auth_names or [])
+            for item in list_cpa_files():
+                item_email = (item.get("email") or "").lower()
+                item_name = item.get("name") or ""
+                if item_email == email.lower() or item_name in auth_name_set:
+                    if delete_from_cpa(item_name):
+                        deleted.append(item_name)
+            results[SYNC_TARGET_CPA] = {"deleted": deleted, "count": len(deleted)}
+        except Exception as exc:
+            logger.warning("[CPA] 删除账号 %s 失败: %s", email, exc)
+            results[SYNC_TARGET_CPA] = {"deleted": [], "count": 0, "error": str(exc)}
 
     if SYNC_TARGET_SUB2API in targets:
         from autoteam.sub2api_sync import delete_account_from_sub2api
 
-        results[SYNC_TARGET_SUB2API] = delete_account_from_sub2api(email, auth_names=auth_names or [])
+        try:
+            results[SYNC_TARGET_SUB2API] = delete_account_from_sub2api(email, auth_names=auth_names or [])
+        except Exception as exc:
+            logger.warning("[Sub2API] 删除账号 %s 失败: %s", email, exc)
+            results[SYNC_TARGET_SUB2API] = {"deleted": [], "count": 0, "error": str(exc)}
 
     return results
