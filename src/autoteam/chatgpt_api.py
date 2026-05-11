@@ -56,6 +56,10 @@ def _normalize_workspace_label(text):
     return " ".join((text or "").split()).strip()
 
 
+def _workspace_match_key(text):
+    return _normalize_workspace_label(text).casefold()
+
+
 def _workspace_candidate_kind(text):
     text = _normalize_workspace_label(text)
     if not text:
@@ -381,6 +385,38 @@ class ChatGPTTeamAPI:
         if not self.page:
             return False
 
+        options = self._list_workspace_options()
+        known_workspace = _workspace_match_key(self.workspace_name)
+        if options:
+            chosen = None
+            if known_workspace:
+                chosen = next((opt for opt in options if _workspace_match_key(opt.get("label")) == known_workspace), None)
+                if not chosen:
+                    logger.warning(
+                        "[ChatGPT] 已知 workspace '%s' 不在当前候选中，跳过自动选择",
+                        self.workspace_name,
+                    )
+                    return False
+            else:
+                preferred = [opt for opt in options if opt.get("kind") == "preferred"]
+                if len(preferred) == 1:
+                    chosen = preferred[0]
+                elif len(options) == 1:
+                    chosen = options[0]
+                else:
+                    logger.warning(
+                        "[ChatGPT] 检测到多个 workspace 候选且缺少已知 workspace，跳过自动选择: %s",
+                        [opt.get("label", "") for opt in options],
+                    )
+                    return False
+
+            label = chosen.get("label", "")
+            if label and self._click_workspace_option_by_label(label):
+                self.workspace_name = label
+                logger.info("[ChatGPT] 自动进入 workspace: %s", label)
+                time.sleep(5)
+                return True
+
         try:
             result = self.page.evaluate(
                 """() => {
@@ -435,9 +471,9 @@ class ChatGPTTeamAPI:
         logger.warning("[ChatGPT] 未找到可自动进入的 workspace: %s", (result or {}).get("reason"))
         return False
 
-    def _inject_session(self, session_token):
+    def _inject_session(self, session_token, include_account_cookie=True):
         cookies = self._build_session_cookies(session_token, "chatgpt.com")
-        if self.account_id:
+        if include_account_cookie and self.account_id:
             cookies.append(
                 {
                     "name": "_account",
@@ -461,6 +497,17 @@ class ChatGPTTeamAPI:
         self.context.add_cookies(cookies)
         self.session_token = session_token
         logger.info("[ChatGPT] 已注入 session cookies")
+
+    def _extract_account_id_from_cookie(self):
+        if not self.context:
+            return ""
+        try:
+            for cookie in self.context.cookies():
+                if cookie.get("name") == "_account" and self._UUID_RE.match(cookie.get("value", "")):
+                    return cookie["value"]
+        except Exception:
+            pass
+        return ""
 
     def is_started(self):
         return bool(self.browser or self.http_transport)
@@ -957,6 +1004,7 @@ class ChatGPTTeamAPI:
             clicked = self._click_workspace_option_by_label(label)
             if not clicked:
                 raise RuntimeError(f"未找到可点击的 workspace 选项: {label}")
+            self.workspace_name = label
 
             exited = self._wait_for_workspace_selection_exit(timeout=15)
             if not exited:
@@ -1196,6 +1244,21 @@ class ChatGPTTeamAPI:
     def submit_admin_code(self, code):
         return self.submit_login_code(code, actor_label="管理员")
 
+    def _choose_account_candidate(self, candidates, preferred_workspace_names=()):
+        preferred_keys = [_workspace_match_key(name) for name in preferred_workspace_names if _workspace_match_key(name)]
+        for key in preferred_keys:
+            for cand in candidates:
+                if _workspace_match_key(cand.get("workspace_name")) == key:
+                    return cand
+
+        for cand in candidates:
+            if cand.get("workspace_name") and _workspace_match_key(cand["workspace_name"]) not in ("personal",):
+                return cand
+
+        if candidates:
+            return candidates[0]
+        return None
+
     def _guess_account_info(self, allow_dom_fallback=True):
         try:
             data = self.page.evaluate(
@@ -1245,16 +1308,8 @@ class ChatGPTTeamAPI:
 
         walk(data)
 
-        chosen = None
-        for cand in candidates:
-            if cand["workspace_name"] and cand["workspace_name"].lower() not in ("personal",):
-                chosen = cand
-                break
-        if not chosen and candidates:
-            chosen = candidates[0]
-
         dom_name = None
-        if allow_dom_fallback:
+        if allow_dom_fallback and not _workspace_match_key(self.workspace_name):
             try:
                 self.page.goto("https://chatgpt.com/admin", wait_until="domcontentloaded", timeout=30000)
                 time.sleep(5)
@@ -1262,8 +1317,9 @@ class ChatGPTTeamAPI:
             except Exception:
                 dom_name = None
 
+        chosen = self._choose_account_candidate(candidates, [self.workspace_name, dom_name])
         account_id = (chosen or {}).get("account_id") or self.account_id
-        workspace_name = (chosen or {}).get("workspace_name") or dom_name or self.workspace_name
+        workspace_name = (chosen or {}).get("workspace_name") or self.workspace_name or dom_name or ""
         return account_id, workspace_name
 
     def complete_login(self, persist_admin_state=False):
@@ -1272,9 +1328,12 @@ class ChatGPTTeamAPI:
             raise RuntimeError("登录成功后未提取到 session token")
 
         self._fetch_access_token()
-        account_id, workspace_name = self._guess_account_info()
-        if account_id:
-            self.account_id = account_id
+        active_account_id = self._extract_account_id_from_access_token() or self._extract_account_id_from_cookie()
+        guessed_account_id, workspace_name = self._guess_account_info()
+        if active_account_id:
+            self.account_id = active_account_id
+        elif guessed_account_id:
+            self.account_id = guessed_account_id
         if workspace_name:
             self.workspace_name = workspace_name
 
@@ -1314,6 +1373,8 @@ class ChatGPTTeamAPI:
 
         self.login_email = email
         self.session_token = session_token
+        self.access_token = None
+        self.account_id = ""
 
         self._launch_browser()
         logger.info("[ChatGPT] 开始导入管理员 session_token: %s", email)
@@ -1321,7 +1382,7 @@ class ChatGPTTeamAPI:
         time.sleep(5)
         self._wait_for_cloudflare()
 
-        self._inject_session(session_token)
+        self._inject_session(session_token, include_account_cookie=False)
         self.page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
         time.sleep(5)
         self._wait_for_cloudflare()
@@ -1336,19 +1397,10 @@ class ChatGPTTeamAPI:
             raise RuntimeError("session_token 无效或已过期，未能从当前登录态获取 access token")
         logger.info("[ChatGPT] session_token 导入后 access token 来源: %s", token_source)
 
-        account_id, workspace_name = self._guess_account_info(allow_dom_fallback=False)
+        account_id = self._extract_account_id_from_access_token() or self._extract_account_id_from_cookie()
+        guessed_account_id, workspace_name = self._guess_account_info(allow_dom_fallback=False)
         if not account_id:
-            account_id = self._extract_account_id_from_access_token()
-        if not account_id:
-            cookie_account_id = ""
-            try:
-                for cookie in self.context.cookies():
-                    if cookie.get("name") == "_account" and self._UUID_RE.match(cookie.get("value", "")):
-                        cookie_account_id = cookie["value"]
-                        break
-            except Exception:
-                pass
-            account_id = cookie_account_id
+            account_id = guessed_account_id
 
         if not account_id:
             raise RuntimeError("无法从 session_token 自动识别 workspace/account ID，请确认该 session 已登录 Team 主号")

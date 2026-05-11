@@ -475,8 +475,13 @@ watch(
       loginEmail.value = next?.email || loginEmail.value
     }
     if (next?.login_step === 'workspace_required' && !workspaceOptionId.value) {
-      const preferred = next?.workspace_options?.find(opt => opt.kind === 'preferred')
-      workspaceOptionId.value = preferred?.id || next?.workspace_options?.[0]?.id || ''
+      const options = next?.workspace_options || []
+      const preferred = options.filter(opt => opt.kind === 'preferred')
+      if (preferred.length === 1) {
+        workspaceOptionId.value = preferred[0].id
+      } else if (options.length === 1) {
+        workspaceOptionId.value = options[0].id
+      }
     }
   },
   { immediate: true },
