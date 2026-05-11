@@ -77,10 +77,6 @@ def get_available_sync_targets(env: Mapping[str, object] | None = None) -> list[
     values = _normalize_env(env)
     available = []
     for target, meta in _SYNC_TARGET_META.items():
-        toggle_key = str(meta["toggle_key"])
-        raw_toggle = (values.get(toggle_key) or "").strip()
-        if raw_toggle and not parse_bool_env(raw_toggle):
-            continue
         if all((values.get(key) or "").strip() for key in tuple(meta["config_keys"])):
             available.append(target)
     return available

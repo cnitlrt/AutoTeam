@@ -1694,11 +1694,14 @@ def _delete_main_codex_from_enabled_targets():
     results = delete_main_codex_from_configured_targets()
     deleted: list[str] = []
     total_count = 0
+    failed_targets: list[str] = []
 
     for target in enabled_targets:
         target_result = results.get(target) or {}
         target_deleted = [str(item) for item in (target_result.get("deleted") or [])]
         deleted.extend(target_deleted)
+        if str(target_result.get("error") or "").strip():
+            failed_targets.append(target)
 
         try:
             target_count = int(target_result.get("count", len(target_deleted)) or 0)
@@ -1707,8 +1710,11 @@ def _delete_main_codex_from_enabled_targets():
         total_count += target_count
 
     target_label = describe_sync_targets(enabled_targets)
+    message = f"已从 {target_label} 删除 {total_count} 个主号认证文件"
+    if failed_targets:
+        message += f"（{describe_sync_targets(failed_targets)} 清理失败，详情见 results）"
     return {
-        "message": f"已从 {target_label} 删除 {total_count} 个主号认证文件",
+        "message": message,
         "deleted": deleted,
         "results": results,
     }
@@ -1881,8 +1887,17 @@ def delete_account(email: str):
             raise HTTPException(status_code=404, detail="账号不存在")
 
         cleanup = _pw_executor.run(delete_managed_account, email)
+        message = "账号删除完成"
+        remote_errors = cleanup.get("remote_errors") or {}
+        if remote_errors:
+            from autoteam.sync_targets import describe_sync_targets
+
+            message = (
+                f"账号删除完成（{describe_sync_targets(list(remote_errors))} 远端清理失败，"
+                "详情见 cleanup.remote_errors）"
+            )
         return {
-            "message": "账号删除完成",
+            "message": message,
             "deleted_email": email,
             "cleanup": cleanup,
         }

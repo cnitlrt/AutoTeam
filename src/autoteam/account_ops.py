@@ -41,6 +41,17 @@ def _parse_team_api_json(response, label):
         raise RuntimeError(f"{label}接口返回了非 JSON 内容: {_response_excerpt(body)}") from exc
 
 
+def _extract_remote_cleanup_errors(results):
+    errors = {}
+    for target, target_result in (results or {}).items():
+        if not isinstance(target_result, dict):
+            continue
+        error = str(target_result.get("error") or "").strip()
+        if error:
+            errors[str(target)] = error
+    return errors
+
+
 def fetch_team_state(chatgpt_api):
     """读取 Team 成员和邀请状态。"""
     account_id = get_chatgpt_account_id()
@@ -81,6 +92,7 @@ def delete_managed_account(
         "local_auth_files": [],
         "cpa_files": [],
         "sub2api_accounts": [],
+        "remote_errors": {},
         "team_member_removed": False,
         "invite_removed": False,
         "cloudmail_deleted": False,
@@ -154,6 +166,7 @@ def delete_managed_account(
         )
         cleanup["cpa_files"] = list((remote_cleanup.get("cpa") or {}).get("deleted", []))
         cleanup["sub2api_accounts"] = list((remote_cleanup.get("sub2api") or {}).get("deleted", []))
+        cleanup["remote_errors"] = _extract_remote_cleanup_errors(remote_cleanup)
 
         if acc:
             accounts = [item for item in accounts if item["email"].lower() != email_l]

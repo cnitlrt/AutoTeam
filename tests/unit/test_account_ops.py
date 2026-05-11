@@ -111,3 +111,47 @@ def test_delete_managed_account_uses_generic_mail_provider_fields(tmp_path, monk
     assert deleted == [55]
     assert cleanup["local_record"] is True
     assert cleanup["cloudmail_deleted"] is True
+
+
+def test_delete_managed_account_preserves_remote_cleanup_errors(tmp_path, monkeypatch):
+    auth_dir = tmp_path / "auths"
+    auth_dir.mkdir()
+    auth_file = auth_dir / "codex-user@example.com-team.json"
+    auth_file.write_text("{}", encoding="utf-8")
+
+    accounts = [
+        {
+            "email": "user@example.com",
+            "status": "standby",
+            "auth_file": str(auth_file),
+            "mail_provider": "cloudflare_temp_email",
+            "mail_account_id": 55,
+            "cloudmail_account_id": None,
+        }
+    ]
+
+    class _FakeMailClient:
+        provider_name = "cloudflare_temp_email"
+
+        def delete_account(self, _account_id):
+            return {"code": 200}
+
+    monkeypatch.setattr(account_ops, "AUTH_DIR", auth_dir)
+    monkeypatch.setattr(account_ops, "load_accounts", lambda: list(accounts))
+    monkeypatch.setattr(account_ops, "save_accounts", lambda items: accounts.clear() or accounts.extend(items))
+    monkeypatch.setattr(
+        account_ops,
+        "delete_account_from_configured_targets",
+        lambda *args, **kwargs: {"sub2api": {"deleted": [], "count": 0, "error": "service offline"}},
+    )
+    monkeypatch.setattr(account_ops, "sync_to_cpa", lambda: None)
+
+    cleanup = account_ops.delete_managed_account(
+        "user@example.com",
+        remove_remote=False,
+        mail_client=_FakeMailClient(),
+        sync_cpa_after=False,
+    )
+
+    assert cleanup["local_record"] is True
+    assert cleanup["remote_errors"] == {"sub2api": "service offline"}

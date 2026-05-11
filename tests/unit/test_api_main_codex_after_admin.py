@@ -216,3 +216,33 @@ def test_post_main_codex_delete_remote_files_requires_enabled_target(monkeypatch
 
     assert exc_info.value.status_code == 400
     assert "启用至少一个远端同步目标" in exc_info.value.detail
+
+
+def test_post_main_codex_delete_remote_files_reports_partial_remote_failures(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "_require_sync_target_configs",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "autoteam.sync_targets.get_enabled_sync_targets",
+        lambda env=None: ["cpa", "sub2api"],
+    )
+    monkeypatch.setattr(
+        "autoteam.sync_targets.delete_main_codex_from_configured_targets",
+        lambda: {
+            "cpa": {"deleted": ["codex-main-acc-1.json"], "count": 1},
+            "sub2api": {"deleted": [], "count": 0, "error": "service offline"},
+        },
+    )
+
+    result = api.post_main_codex_delete_remote_files()
+
+    assert result == {
+        "message": "已从 CPA + Sub2API 删除 1 个主号认证文件（Sub2API 清理失败，详情见 results）",
+        "deleted": ["codex-main-acc-1.json"],
+        "results": {
+            "cpa": {"deleted": ["codex-main-acc-1.json"], "count": 1},
+            "sub2api": {"deleted": [], "count": 0, "error": "service offline"},
+        },
+    }
