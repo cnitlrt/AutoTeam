@@ -220,6 +220,25 @@ def test_get_account_mail_client_uses_inferred_provider_for_unbound_account(monk
     assert captured == ["cloudmail"]
 
 
+def test_get_account_mail_client_falls_back_to_default_client_when_domain_is_unknown(monkeypatch):
+    sentinel = object()
+
+    monkeypatch.delenv("CLOUDMAIL_DOMAIN", raising=False)
+    monkeypatch.delenv("CF_TEMP_EMAIL_DOMAIN", raising=False)
+    monkeypatch.setattr(manager, "CloudMailClient", lambda: sentinel)
+
+    client = manager._get_account_mail_client(
+        {
+            "email": "old-1@example.com",
+            "mail_provider": None,
+            "mail_account_id": None,
+            "cloudmail_account_id": None,
+        }
+    )
+
+    assert client is sentinel
+
+
 def test_sync_account_states_infers_provider_for_existing_and_new_accounts(monkeypatch, tmp_path):
     accounts = [
         {

@@ -131,7 +131,12 @@ def _auto_reuse_skip_reason(acc: dict | None) -> str | None:
 
 
 def _get_account_mail_client(acc: dict | None):
-    return get_mail_client_for_account(acc)
+    acc = acc or {}
+    has_explicit_mail_binding = bool(acc.get("mail_provider")) or acc.get("mail_account_id") is not None
+    has_legacy_cloudmail_binding = acc.get("cloudmail_account_id") is not None
+    if has_explicit_mail_binding or has_legacy_cloudmail_binding or infer_mail_provider_from_email(acc.get("email")):
+        return get_mail_client_for_account(acc)
+    return CloudMailClient()
 
 
 def _can_attempt_auth_repair(acc: dict | None, mail_domain_suffix: str = "") -> bool:
