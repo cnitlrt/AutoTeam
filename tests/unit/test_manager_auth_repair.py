@@ -196,6 +196,77 @@ def test_login_codex_with_result_retries_retryable_failures_within_same_round(mo
     assert result["attempts"] == 3
 
 
+def test_get_account_mail_client_uses_inferred_provider_for_unbound_account(monkeypatch):
+    captured = []
+
+    monkeypatch.setenv("MAIL_PROVIDER", "cloudflare_temp_email")
+    monkeypatch.setenv("CLOUDMAIL_DOMAIN", "@52100521.xyz")
+    monkeypatch.setenv("CF_TEMP_EMAIL_DOMAIN", "xxmail.idapro.tech")
+    monkeypatch.setattr(
+        manager,
+        "get_mail_client_for_account",
+        lambda acc: captured.append(manager.get_account_mail_provider(acc)) or object(),
+    )
+
+    manager._get_account_mail_client(
+        {
+            "email": "tmp-9c0ebe17@52100521.xyz",
+            "mail_provider": None,
+            "mail_account_id": None,
+            "cloudmail_account_id": None,
+        }
+    )
+
+    assert captured == ["cloudmail"]
+
+
+def test_sync_account_states_infers_provider_for_existing_and_new_accounts(monkeypatch, tmp_path):
+    accounts = [
+        {
+            "email": "tmp-old@52100521.xyz",
+            "password": "",
+            "mail_provider": None,
+            "mail_account_id": None,
+            "cloudmail_account_id": None,
+            "status": "standby",
+            "auth_file": None,
+            "quota_exhausted_at": None,
+            "quota_resets_at": None,
+            "created_at": 0,
+            "last_active_at": None,
+        }
+    ]
+    saved = {}
+
+    class _FakeChatGPT:
+        def _api_fetch(self, method, path):
+            assert method == "GET"
+            assert path == "/backend-api/accounts/acc-1/users"
+            return {
+                "status": 200,
+                "body": ('{"items":[{"email":"tmp-old@52100521.xyz"},{"email":"tmp-new@xxmail.idapro.tech"}]} '),
+            }
+
+    monkeypatch.setenv("MAIL_PROVIDER", "cloudflare_temp_email")
+    monkeypatch.setenv("CLOUDMAIL_DOMAIN", "@52100521.xyz")
+    monkeypatch.setenv("CF_TEMP_EMAIL_DOMAIN", "xxmail.idapro.tech")
+    monkeypatch.setattr(manager, "get_chatgpt_account_id", lambda: "acc-1")
+    monkeypatch.setattr(manager, "_chatgpt_session_ready", lambda _chatgpt: True)
+    monkeypatch.setattr(manager, "load_accounts", lambda: accounts)
+    monkeypatch.setattr(manager, "save_accounts", lambda items: saved.setdefault("accounts", [dict(i) for i in items]))
+    monkeypatch.setattr("autoteam.codex_auth.AUTH_DIR", tmp_path)
+
+    manager.sync_account_states(chatgpt_api=_FakeChatGPT())
+
+    saved_accounts = saved["accounts"]
+    existing = next(acc for acc in saved_accounts if acc["email"] == "tmp-old@52100521.xyz")
+    added = next(acc for acc in saved_accounts if acc["email"] == "tmp-new@xxmail.idapro.tech")
+
+    assert existing["mail_provider"] == "cloudmail"
+    assert added["mail_provider"] == "cloudflare_temp_email"
+    assert added["status"] == "auth_pending"
+
+
 def test_login_codex_with_result_stops_immediately_on_hard_failure(monkeypatch):
     attempts = {"count": 0}
 

@@ -62,7 +62,7 @@ from autoteam.mail_provider import (
     get_account_mail_provider,
     get_mail_client_for_account,
     get_mail_domain,
-    get_mail_provider_name,
+    infer_mail_provider_from_email,
 )
 from autoteam.mail_provider import (
     get_mail_client as CloudMailClient,
@@ -131,12 +131,7 @@ def _auto_reuse_skip_reason(acc: dict | None) -> str | None:
 
 
 def _get_account_mail_client(acc: dict | None):
-    acc = acc or {}
-    has_explicit_mail_binding = bool(acc.get("mail_provider")) or acc.get("mail_account_id") is not None
-    has_legacy_cloudmail_binding = acc.get("cloudmail_account_id") is not None
-    if has_explicit_mail_binding or has_legacy_cloudmail_binding:
-        return get_mail_client_for_account(acc)
-    return CloudMailClient()
+    return get_mail_client_for_account(acc)
 
 
 def _can_attempt_auth_repair(acc: dict | None, mail_domain_suffix: str = "") -> bool:
@@ -146,6 +141,8 @@ def _can_attempt_auth_repair(acc: dict | None, mail_domain_suffix: str = "") -> 
         or acc.get("mail_account_id") is not None
         or acc.get("cloudmail_account_id") is not None
     ):
+        return True
+    if infer_mail_provider_from_email(acc.get("email")):
         return True
     email = _normalized_email(acc.get("email"))
     return bool(mail_domain_suffix and mail_domain_suffix in email)
@@ -575,15 +572,20 @@ def sync_account_states(chatgpt_api=None):
             chatgpt_api.stop()
 
     # 对照更新状态
-    domain_value = get_mail_domain()
-    domain_suffix = domain_value.lstrip("@") if domain_value else ""
-    current_mail_provider = get_mail_provider_name()
-
     changed = False
     local_email_set = {a["email"].lower() for a in accounts}
 
     for acc in accounts:
         email = acc["email"].lower()
+        inferred_provider = infer_mail_provider_from_email(email)
+        if (
+            inferred_provider
+            and not acc.get("mail_provider")
+            and acc.get("mail_account_id") is None
+            and acc.get("cloudmail_account_id") is None
+        ):
+            acc["mail_provider"] = inferred_provider
+            changed = True
         in_team = email in team_emails
 
         if in_team:
@@ -609,29 +611,30 @@ def sync_account_states(chatgpt_api=None):
             changed = True
 
     # Team 中有我们域名但本地无记录的成员 → 自动添加
-    if domain_suffix:
-        for email in team_emails:
-            if _is_main_account_email(email):
-                continue
-            if domain_suffix in email and email not in local_email_set:
-                accounts.append(
-                    {
-                        "email": email,
-                        "password": "",
-                        "mail_provider": current_mail_provider,
-                        "mail_account_id": None,
-                        "cloudmail_account_id": None,
-                        "status": STATUS_AUTH_PENDING,
-                        "auth_file": None,
-                        "quota_exhausted_at": None,
-                        "quota_resets_at": None,
-                        "created_at": time.time(),
-                        "last_active_at": None,
-                        **_auth_repair_reset_fields(),
-                    }
-                )
-                changed = True
-                logger.info("[同步] 发现 Team 中新成员: %s（已添加到本地，状态=auth_pending）", email)
+    for email in team_emails:
+        if _is_main_account_email(email) or email in local_email_set:
+            continue
+        inferred_provider = infer_mail_provider_from_email(email)
+        if not inferred_provider:
+            continue
+        accounts.append(
+            {
+                "email": email,
+                "password": "",
+                "mail_provider": inferred_provider,
+                "mail_account_id": None,
+                "cloudmail_account_id": None,
+                "status": STATUS_AUTH_PENDING,
+                "auth_file": None,
+                "quota_exhausted_at": None,
+                "quota_resets_at": None,
+                "created_at": time.time(),
+                "last_active_at": None,
+                **_auth_repair_reset_fields(),
+            }
+        )
+        changed = True
+        logger.info("[同步] 发现 Team 中新成员: %s（已添加到本地，状态=auth_pending）", email)
 
     # auths 目录中有认证文件但本地无记录的 → 自动添加为 standby
     from autoteam.codex_auth import AUTH_DIR
@@ -651,7 +654,7 @@ def sync_account_states(chatgpt_api=None):
                     {
                         "email": email,
                         "password": "",
-                        "mail_provider": current_mail_provider,
+                        "mail_provider": infer_mail_provider_from_email(email),
                         "mail_account_id": None,
                         "cloudmail_account_id": None,
                         "status": status,

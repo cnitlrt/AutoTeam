@@ -35,6 +35,17 @@ def normalize_mail_provider(value: object | None, default: str = MAIL_PROVIDER_C
     return default
 
 
+def _normalize_domain(value: object | None) -> str:
+    return str(value or "").strip().lower().lstrip("@")
+
+
+def _extract_email_domain(email: object | None) -> str:
+    text = str(email or "").strip().lower()
+    if "@" not in text:
+        return ""
+    return _normalize_domain(text.rsplit("@", 1)[-1])
+
+
 def get_mail_provider_name(env: dict[str, Any] | None = None) -> str:
     source = env or os.environ
     return normalize_mail_provider(source.get("MAIL_PROVIDER"))
@@ -60,6 +71,21 @@ def get_mail_domain(provider: str | None = None, env: dict[str, Any] | None = No
     return str(source.get("CLOUDMAIL_DOMAIN", "") or "").strip()
 
 
+def infer_mail_provider_from_email(email: object | None, env: dict[str, Any] | None = None) -> str:
+    email_domain = _extract_email_domain(email)
+    if not email_domain:
+        return ""
+
+    matches = [
+        provider
+        for provider in SUPPORTED_MAIL_PROVIDERS
+        if email_domain == _normalize_domain(get_mail_domain(provider, env=env))
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return ""
+
+
 def get_account_mail_provider(acc: dict[str, Any] | None, default_provider: str | None = None) -> str:
     acc = acc or {}
     provider = normalize_mail_provider(acc.get("mail_provider"), default="")
@@ -67,6 +93,9 @@ def get_account_mail_provider(acc: dict[str, Any] | None, default_provider: str 
         return provider
     if acc.get("cloudmail_account_id") is not None:
         return MAIL_PROVIDER_CLOUDMAIL
+    inferred = infer_mail_provider_from_email(acc.get("email"))
+    if inferred:
+        return inferred
     if default_provider:
         return normalize_mail_provider(default_provider)
     return get_mail_provider_name()
