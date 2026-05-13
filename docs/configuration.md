@@ -45,6 +45,12 @@ cp .env.example .env
 | `AUTO_CHECK_RETRY_ADD_PHONE` | 是否自动重试 `add_phone`（手机号验证） | 否（默认 `true`） |
 | `AUTO_CHECK_ADD_PHONE_MAX_RETRIES` | `add_phone` 最大自动重试次数 | 否（默认 `3`） |
 
+> **2-seat 注意事项**
+>
+> 当 `AUTO_CHECK_TARGET_SEATS=2` 时，为尽量实现无感切换，系统会优先尝试“先加新账号，再移出旧账号”。
+> 这会让 Team 在短时间内额外占用一个 seat，因此下个月账单可能比预期略高。
+> 如果你不希望出现这类额外占位，建议将主号的 `seat type` 改成 `codex`，同时保持总 seat 数仍为 `2`。
+
 ## 配置面板分区
 
 登录 Web 面板后，配置面板已拆成独立分区：
@@ -64,6 +70,7 @@ cp .env.example .env
 - CPA / Sub2API 开关、连接信息和 Sub2API 默认账号设置放在 **远端同步**
 - `.env` 原文编辑保留在 **源文件编辑**
 - 代理配置属于低频项，默认折叠
+- 当总 seat 数设为 `2` 时，「巡检设置」里会显示对应注意事项
 
 ## Sub2API 分组
 

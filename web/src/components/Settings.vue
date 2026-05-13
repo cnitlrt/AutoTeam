@@ -406,6 +406,17 @@
           {{ saving ? '保存中...' : '保存' }}
         </button>
       </div>
+
+      <div
+        v-if="form.target_seats === 2"
+        class="mt-4 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-xs leading-6 text-amber-200"
+      >
+        <div class="font-medium text-amber-100">注意事项</div>
+        <div class="mt-1">
+          为了尽量实现 2-seat 的无感切换，系统会优先尝试“先加账号、再踢旧账号”，因此短时间内可能出现额外占位，
+          导致下个月账单比预期多一些。若不希望这样，可将主号的 seat type 改成 codex，并保持这里的总 seat 数仍为 2。
+        </div>
+      </div>
     </div>
   </div>
 </template>
