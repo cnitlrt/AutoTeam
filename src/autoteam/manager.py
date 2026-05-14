@@ -60,12 +60,15 @@ from autoteam.config import get_playwright_launch_options
 from autoteam.cpa_sync import sync_from_cpa
 from autoteam.mail_provider import (
     get_account_mail_provider,
+    get_account_mail_service_id,
     get_mail_client_for_account,
     get_mail_domain,
+    get_mail_services,
     infer_mail_provider_from_email,
+    infer_mail_service_from_email,
 )
 from autoteam.mail_provider import (
-    get_mail_client as CloudMailClient,
+    get_mail_client as get_mail_client,
 )
 from autoteam.signup_profile import SignupProfile, generate_signup_profile
 from autoteam.sync_targets import (
@@ -80,6 +83,9 @@ logger = logging.getLogger(__name__)
 
 MAIL_TIMEOUT = int(os.environ.get("MAIL_TIMEOUT", "180"))
 REUSE_RESET_GRACE_SECONDS = int(os.environ.get("REUSE_RESET_GRACE_SECONDS", "300"))
+
+# 兼容旧调用名：现在返回“默认邮箱服务”的客户端，不再只指向 CloudMail。
+CloudMailClient = get_mail_client
 
 
 def _chatgpt_session_ready(chatgpt_api) -> bool:
@@ -132,22 +138,46 @@ def _auto_reuse_skip_reason(acc: dict | None) -> str | None:
 
 def _get_account_mail_client(acc: dict | None):
     acc = acc or {}
-    has_explicit_mail_binding = bool(acc.get("mail_provider")) or acc.get("mail_account_id") is not None
+    has_explicit_mail_binding = (
+        bool(acc.get("mail_service_id")) or bool(acc.get("mail_provider")) or acc.get("mail_account_id") is not None
+    )
     has_legacy_cloudmail_binding = acc.get("cloudmail_account_id") is not None
-    if has_explicit_mail_binding or has_legacy_cloudmail_binding or infer_mail_provider_from_email(acc.get("email")):
+    if has_explicit_mail_binding or has_legacy_cloudmail_binding or infer_mail_service_from_email(acc.get("email")):
         return get_mail_client_for_account(acc)
-    return CloudMailClient()
+
+    services = get_mail_services()
+    if len(services) == 1:
+        return get_mail_client(service=services[0])
+    if not services:
+        return CloudMailClient()
+
+    email = _normalized_email(acc.get("email"))
+    raise ValueError(
+        f"无法唯一确定账号 {email or '<unknown>'} 对应的邮箱服务，请补充 mail_service_id 或确保邮箱域名只匹配一个服务"
+    )
+
+
+def _account_mail_cache_key(acc: dict | None) -> str:
+    acc = acc or {}
+    service_id = get_account_mail_service_id(acc)
+    if service_id:
+        return f"service:{service_id}"
+    provider = get_account_mail_provider(acc, default_provider="")
+    if provider:
+        return f"provider:{provider}"
+    return "default"
 
 
 def _can_attempt_auth_repair(acc: dict | None, mail_domain_suffix: str = "") -> bool:
     acc = acc or {}
     if (
-        bool(acc.get("mail_provider"))
+        bool(acc.get("mail_service_id"))
+        or bool(acc.get("mail_provider"))
         or acc.get("mail_account_id") is not None
         or acc.get("cloudmail_account_id") is not None
     ):
         return True
-    if infer_mail_provider_from_email(acc.get("email")):
+    if infer_mail_service_from_email(acc.get("email")):
         return True
     email = _normalized_email(acc.get("email"))
     return bool(mail_domain_suffix and mail_domain_suffix in email)
@@ -582,7 +612,11 @@ def sync_account_states(chatgpt_api=None):
 
     for acc in accounts:
         email = acc["email"].lower()
+        inferred_service_id = infer_mail_service_from_email(email)
         inferred_provider = infer_mail_provider_from_email(email)
+        if inferred_service_id and not acc.get("mail_service_id"):
+            acc["mail_service_id"] = inferred_service_id
+            changed = True
         if (
             inferred_provider
             and not acc.get("mail_provider")
@@ -619,6 +653,7 @@ def sync_account_states(chatgpt_api=None):
     for email in team_emails:
         if _is_main_account_email(email) or email in local_email_set:
             continue
+        inferred_service_id = infer_mail_service_from_email(email)
         inferred_provider = infer_mail_provider_from_email(email)
         if not inferred_provider:
             continue
@@ -626,6 +661,7 @@ def sync_account_states(chatgpt_api=None):
             {
                 "email": email,
                 "password": "",
+                "mail_service_id": inferred_service_id or None,
                 "mail_provider": inferred_provider,
                 "mail_account_id": None,
                 "cloudmail_account_id": None,
@@ -655,10 +691,12 @@ def sync_account_states(chatgpt_api=None):
                 # 判断是否在 Team 中
                 in_team = email in team_emails
                 status = STATUS_ACTIVE if in_team else STATUS_STANDBY
+                inferred_service_id = infer_mail_service_from_email(email)
                 accounts.append(
                     {
                         "email": email,
                         "password": "",
+                        "mail_service_id": inferred_service_id or None,
                         "mail_provider": infer_mail_provider_from_email(email),
                         "mail_account_id": None,
                         "cloudmail_account_id": None,
@@ -864,7 +902,7 @@ def cmd_check(force_auth_repair=False, preserve_low_active=False, preserved_low_
     if pending_accounts:
         logger.info("[检查] 对账 %d 个 pending 账号...", len(pending_accounts))
         chatgpt = None
-        mail_client = None
+        pending_mail_clients = {}
         deleted_pending = 0
         try:
             chatgpt = ChatGPTTeamAPI()
@@ -888,10 +926,12 @@ def cmd_check(force_auth_repair=False, preserve_low_active=False, preserved_low_
                     continue
 
                 logger.warning("[检查] pending 账号为失败孤儿，删除: %s", email)
-                desired_provider = get_account_mail_provider(acc)
-                if mail_client is None or getattr(mail_client, "provider_name", "") != desired_provider:
+                cache_key = _account_mail_cache_key(acc)
+                mail_client = pending_mail_clients.get(cache_key)
+                if mail_client is None:
                     mail_client = _get_account_mail_client(acc)
                     mail_client.login()
+                    pending_mail_clients[cache_key] = mail_client
                 delete_managed_account(
                     email,
                     remove_remote=True,
@@ -1121,12 +1161,12 @@ def cmd_check(force_auth_repair=False, preserve_low_active=False, preserved_low_
             email = acc["email"]
             password = acc.get("password", "")
             logger.info("[%s] 重新 Codex 登录...", email)
-            provider = get_account_mail_provider(acc)
-            mail_client = mail_clients.get(provider)
+            cache_key = _account_mail_cache_key(acc)
+            mail_client = mail_clients.get(cache_key)
             if mail_client is None:
                 mail_client = _get_account_mail_client(acc)
                 mail_client.login()
-                mail_clients[provider] = mail_client
+                mail_clients[cache_key] = mail_client
             login_result = _login_codex_with_result(email, password, mail_client=mail_client)
             bundle = login_result.get("bundle")
             if login_result.get("ok") and bundle:
@@ -1367,7 +1407,12 @@ def _check_pending_invites(chatgpt_api, mail_client):
             password = acc.get("password", f"Tmp_{uuid.uuid4().hex[:12]}!")
         else:
             password = f"Tmp_{uuid.uuid4().hex[:12]}!"
-            add_account(inv_email, password)
+            add_account(
+                inv_email,
+                password,
+                mail_provider=getattr(mail_client, "provider_name", ""),
+                mail_service_id=getattr(mail_client, "service_id", None),
+            )
 
         # 关闭 ChatGPT 浏览器再注册
         chatgpt_api.stop()
@@ -2115,6 +2160,7 @@ def create_account_direct(mail_client):
         cloudmail_account_id=account_id if getattr(mail_client, "provider_name", "") == "cloudmail" else None,
         mail_provider=getattr(mail_client, "provider_name", ""),
         mail_account_id=account_id,
+        mail_service_id=getattr(mail_client, "service_id", None),
     )
 
     # Step 4: Codex 登录
@@ -2258,12 +2304,12 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
         return mail_client
 
     def ensure_account_mail(acc):
-        provider = get_account_mail_provider(acc)
-        client = reuse_mail_clients.get(provider)
+        cache_key = _account_mail_cache_key(acc)
+        client = reuse_mail_clients.get(cache_key)
         if client is None:
             client = _get_account_mail_client(acc)
             client.login()
-            reuse_mail_clients[provider] = client
+            reuse_mail_clients[cache_key] = client
         return client
 
     def refresh_current_count(current_count, stage_label):
@@ -2978,12 +3024,12 @@ def cmd_fill(target=5):
     reuse_mail_clients = {}
 
     def ensure_account_mail(acc):
-        provider = get_account_mail_provider(acc)
-        client = reuse_mail_clients.get(provider)
+        cache_key = _account_mail_cache_key(acc)
+        client = reuse_mail_clients.get(cache_key)
         if client is None:
             client = _get_account_mail_client(acc)
             client.login()
-            reuse_mail_clients[provider] = client
+            reuse_mail_clients[cache_key] = client
         return client
 
     try:

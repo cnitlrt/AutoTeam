@@ -77,8 +77,9 @@ docker compose up -d
 
 ## 配置原则
 
-- **新建账号**：使用当前 `MAIL_PROVIDER`
-- **复用旧账号**：按账号自身保存的 `mail_provider`
+- **新建账号**：使用默认邮箱服务（`MAIL_SERVICE_DEFAULT` / 配置面板默认项）
+- **复用旧账号**：优先按账号自身保存的 `mail_service_id`，否则按唯一邮箱域名匹配
+- **邮箱服务**：可同时配置多个 CloudMail / Cloudflare Temp Email 实例
 - **远端同步**：可启用 **CPA**、**Sub2API**，也可同时启用
 - **Sub2API 默认账号设置**：可在配置面板里统一管理新建账号的并发、优先级、倍率、白名单、WS / passthrough
 - **2-seat 注意事项**：当总 seat 数设为 `2` 时，为尽量实现无感切换，系统可能先加新账号再移出旧账号，短时间内会多占一个 seat，可能让下个月账单略高；若不希望这样，可将主号的 `seat type` 改成 `codex`，并保持总 seat 数仍为 `2`

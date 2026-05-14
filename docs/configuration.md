@@ -10,14 +10,16 @@ cp .env.example .env
 
 | 配置项 | 说明 | 何时需要 |
 |--------|------|------|
-| `MAIL_PROVIDER` | 当前邮箱服务提供者（`cloudmail` / `cloudflare_temp_email`） | 账号池操作时建议显式填写 |
-| `CLOUDMAIL_BASE_URL` | CloudMail API 地址 | 账号池操作时必填 |
-| `CLOUDMAIL_EMAIL` | CloudMail 登录邮箱 | 账号池操作时必填 |
-| `CLOUDMAIL_PASSWORD` | CloudMail 登录密码 | 账号池操作时必填 |
-| `CLOUDMAIL_DOMAIN` | 临时邮箱域名（如 `@example.com`） | 账号池操作时必填 |
-| `CF_TEMP_EMAIL_BASE_URL` | Cloudflare Temp Email 后端 API 根地址 | 使用 Cloudflare Temp Email 时必填 |
-| `CF_TEMP_EMAIL_ADMIN_PASSWORD` | Cloudflare Temp Email 管理员密码 | 使用 Cloudflare Temp Email 时必填 |
-| `CF_TEMP_EMAIL_DOMAIN` | Cloudflare Temp Email 默认邮箱域名 | 使用 Cloudflare Temp Email 时必填 |
+| `MAIL_SERVICES_JSON` | 邮箱服务列表（内部 JSON） | 配置面板保存多邮箱服务时自动写入 |
+| `MAIL_SERVICE_DEFAULT` | 默认新建邮箱服务 ID | 使用多邮箱服务时自动写入 |
+| `MAIL_PROVIDER` | 当前默认邮箱服务类型（兼容旧配置） | 兼容旧脚本 / 旧 `.env` |
+| `CLOUDMAIL_BASE_URL` | CloudMail API 地址 | CloudMail 服务项必填 |
+| `CLOUDMAIL_EMAIL` | CloudMail 登录邮箱 | CloudMail 服务项必填 |
+| `CLOUDMAIL_PASSWORD` | CloudMail 登录密码 | CloudMail 服务项必填 |
+| `CLOUDMAIL_DOMAIN` | 临时邮箱域名（如 `@example.com`） | CloudMail 服务项必填 |
+| `CF_TEMP_EMAIL_BASE_URL` | Cloudflare Temp Email 后端 API 根地址 | Cloudflare Temp Email 服务项必填 |
+| `CF_TEMP_EMAIL_ADMIN_PASSWORD` | Cloudflare Temp Email 管理员密码 | Cloudflare Temp Email 服务项必填 |
+| `CF_TEMP_EMAIL_DOMAIN` | Cloudflare Temp Email 默认邮箱域名 | Cloudflare Temp Email 服务项必填 |
 | `SYNC_TARGET_CPA` | 是否启用 CPA 同步（`true/false`） | 否 |
 | `CPA_URL` | CPA（CLIProxyAPI）地址 | 启用 CPA 时必填（默认 `http://127.0.0.1:8317`） |
 | `CPA_KEY` | CPA 管理密钥 | 启用 CPA 时必填 |
@@ -66,11 +68,30 @@ cp .env.example .env
 其中：
 
 - `API_KEY` 单独放在 **安全 / 访问控制**
-- 邮箱提供者选择、CloudMail / Cloudflare Temp Email 参数放在 **邮箱服务**
+- 多个 CloudMail / Cloudflare Temp Email 服务项，以及默认新建服务选择放在 **邮箱服务**
 - CPA / Sub2API 开关、连接信息和 Sub2API 默认账号设置放在 **远端同步**
 - `.env` 原文编辑保留在 **源文件编辑**
 - 代理配置属于低频项，默认折叠
 - 当总 seat 数设为 `2` 时，「巡检设置」里会显示对应注意事项
+
+## 多邮箱服务说明
+
+AutoTeam 现在支持同时维护多个邮箱服务实例：
+
+- 可同时添加多个 `CloudMail`
+- 可同时添加多个 `Cloudflare Temp Email`
+- 必须指定一个**默认服务**，用于新建账号
+- 已有账号会优先使用：
+  1. 账号自身保存的 `mail_service_id`
+  2. 唯一邮箱域名匹配到的服务
+  3. 如果当前只配置了一个服务，也会自动回退到该服务
+- 如果存在多个候选服务且无法唯一确定，系统不会盲猜，会提示补充 `mail_service_id` 或修正域名配置
+
+> 兼容性说明：
+>
+> - 旧版单服务 `.env` 仍然可用
+> - 配置面板保存后，会把默认服务镜像回 `MAIL_PROVIDER` 和对应的旧版 `CLOUDMAIL_*` / `CF_TEMP_EMAIL_*` 字段
+> - 非默认服务会保存在 `MAIL_SERVICES_JSON` 中
 
 ## Sub2API 分组
 

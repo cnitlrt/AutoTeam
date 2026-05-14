@@ -13,7 +13,7 @@ if sys.platform == "linux" and not os.environ.get("DISPLAY"):
 
         _vdisplay = Xvfb(width=1280, height=800)
         _vdisplay.start()
-    except (ImportError, OSError):
+    except (ImportError, OSError, RuntimeError):
         try:
             os.system("Xvfb :99 -screen 0 1280x800x24 &")
             os.environ["DISPLAY"] = ":99"

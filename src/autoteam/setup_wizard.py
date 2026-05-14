@@ -9,7 +9,11 @@ import sys
 from autoteam.config import PROJECT_ROOT
 from autoteam.mail_provider import (
     MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL,
+    get_default_mail_service,
     get_mail_provider_name,
+    get_mail_service_display_name,
+    get_mail_service_missing_fields,
+    get_mail_services,
 )
 from autoteam.textio import parse_env_line, read_text, write_text
 
@@ -26,6 +30,8 @@ STARTUP_REQUIRED_CONFIGS = [
 # 可在配置面板中编辑的配置项（key, 提示, 默认值, 是否可选）
 REQUIRED_CONFIGS = [
     ("MAIL_PROVIDER", "邮箱服务提供者（cloudmail/cloudflare_temp_email）", "cloudmail", True),
+    ("MAIL_SERVICES_JSON", "邮箱服务列表 JSON（内部使用）", "", True),
+    ("MAIL_SERVICE_DEFAULT", "默认新建邮箱服务 ID（内部使用）", "", True),
     ("CLOUDMAIL_BASE_URL", "CloudMail API 地址", "", True),
     ("CLOUDMAIL_EMAIL", "CloudMail 登录邮箱", "", True),
     ("CLOUDMAIL_PASSWORD", "CloudMail 登录密码", "", True),
@@ -181,27 +187,29 @@ def check_and_setup(interactive: bool = True) -> bool:
     return True
 
 
-def _verify_cloudmail():
+def _verify_cloudmail(service: dict | None = None):
     """验证 CloudMail 配置是否正确：登录 + 创建测试邮箱 + 删除"""
-    base_url = os.environ.get("CLOUDMAIL_BASE_URL", "")
-    email = os.environ.get("CLOUDMAIL_EMAIL", "")
-    password = os.environ.get("CLOUDMAIL_PASSWORD", "")
-    domain = os.environ.get("CLOUDMAIL_DOMAIN", "")
+    service = service or {}
+    base_url = str(service.get("base_url") or os.environ.get("CLOUDMAIL_BASE_URL", "") or "").strip()
+    email = str(service.get("email") or os.environ.get("CLOUDMAIL_EMAIL", "") or "").strip()
+    password = str(service.get("password") or os.environ.get("CLOUDMAIL_PASSWORD", "") or "").strip()
+    domain = str(service.get("domain") or os.environ.get("CLOUDMAIL_DOMAIN", "") or "").strip()
 
     if not all([base_url, email, password, domain]):
         return
 
-    logger.info("[验证] CloudMail 配置...")
+    label = get_mail_service_display_name(service or {"type": "cloudmail", "domain": domain})
+    logger.info("[验证] %s 配置...", label)
 
     try:
         from autoteam.cloudmail import CloudMailClient
 
-        client = CloudMailClient()
+        client = CloudMailClient(service=service or None)
         client.login()
-        logger.info("[验证] CloudMail 登录成功")
+        logger.info("[验证] %s 登录成功", label)
     except Exception as e:
-        logger.error("[验证] CloudMail 登录失败: %s", e)
-        logger.error("[验证] 请检查 CLOUDMAIL_BASE_URL、CLOUDMAIL_EMAIL、CLOUDMAIL_PASSWORD")
+        logger.error("[验证] %s 登录失败: %s", label, e)
+        logger.error("[验证] 请检查 %s 的 base_url / email / password", label)
         return False
 
     test_account_id = None
@@ -209,43 +217,45 @@ def _verify_cloudmail():
         import uuid as _uuid
 
         test_account_id, test_email = client.create_temp_email(prefix=f"at-test-{_uuid.uuid4().hex[:6]}")
-        logger.info("[验证] CloudMail 创建测试邮箱成功: %s", test_email)
+        logger.info("[验证] %s 创建测试邮箱成功: %s", label, test_email)
     except Exception as e:
-        logger.error("[验证] CloudMail 创建邮箱失败: %s", e)
-        logger.error("[验证] 请检查 CLOUDMAIL_DOMAIN 是否正确")
+        logger.error("[验证] %s 创建邮箱失败: %s", label, e)
+        logger.error("[验证] 请检查 %s 的 domain 是否正确", label)
         return False
 
     try:
         if test_account_id:
             client.delete_account(test_account_id)
-            logger.info("[验证] CloudMail 测试邮箱已清理")
+            logger.info("[验证] %s 测试邮箱已清理", label)
     except Exception as e:
-        logger.warning("[验证] CloudMail 清理测试邮箱失败: %s（不影响使用）", e)
+        logger.warning("[验证] %s 清理测试邮箱失败: %s（不影响使用）", label, e)
 
-    logger.info("[验证] CloudMail 配置验证通过")
+    logger.info("[验证] %s 配置验证通过", label)
     return True
 
 
-def _verify_cloudflare_temp_email():
+def _verify_cloudflare_temp_email(service: dict | None = None):
     """验证 Cloudflare Temp Email 配置是否正确：鉴权 + 创建测试邮箱 + 删除。"""
-    base_url = os.environ.get("CF_TEMP_EMAIL_BASE_URL", "")
-    password = os.environ.get("CF_TEMP_EMAIL_ADMIN_PASSWORD", "")
-    domain = os.environ.get("CF_TEMP_EMAIL_DOMAIN", "")
+    service = service or {}
+    base_url = str(service.get("base_url") or os.environ.get("CF_TEMP_EMAIL_BASE_URL", "") or "").strip()
+    password = str(service.get("admin_password") or os.environ.get("CF_TEMP_EMAIL_ADMIN_PASSWORD", "") or "").strip()
+    domain = str(service.get("domain") or os.environ.get("CF_TEMP_EMAIL_DOMAIN", "") or "").strip()
 
     if not all([base_url, password, domain]):
         return
 
-    logger.info("[验证] Cloudflare Temp Email 配置...")
+    label = get_mail_service_display_name(service or {"type": MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL, "domain": domain})
+    logger.info("[验证] %s 配置...", label)
 
     try:
         from autoteam.cloudflare_temp_email import CloudflareTempEmailClient
 
-        client = CloudflareTempEmailClient()
+        client = CloudflareTempEmailClient(service=service or None)
         client.login()
-        logger.info("[验证] Cloudflare Temp Email 登录成功")
+        logger.info("[验证] %s 登录成功", label)
     except Exception as e:
-        logger.error("[验证] Cloudflare Temp Email 登录失败: %s", e)
-        logger.error("[验证] 请检查 CF_TEMP_EMAIL_BASE_URL、CF_TEMP_EMAIL_ADMIN_PASSWORD")
+        logger.error("[验证] %s 登录失败: %s", label, e)
+        logger.error("[验证] 请检查 %s 的 base_url / admin_password", label)
         return False
 
     test_account_id = None
@@ -253,28 +263,51 @@ def _verify_cloudflare_temp_email():
         import uuid as _uuid
 
         test_account_id, test_email = client.create_temp_email(prefix=f"at-test-{_uuid.uuid4().hex[:6]}")
-        logger.info("[验证] Cloudflare Temp Email 创建测试邮箱成功: %s", test_email)
+        logger.info("[验证] %s 创建测试邮箱成功: %s", label, test_email)
     except Exception as e:
-        logger.error("[验证] Cloudflare Temp Email 创建邮箱失败: %s", e)
-        logger.error("[验证] 请检查 CF_TEMP_EMAIL_DOMAIN 是否正确")
+        logger.error("[验证] %s 创建邮箱失败: %s", label, e)
+        logger.error("[验证] 请检查 %s 的 domain 是否正确", label)
         return False
 
     try:
         if test_account_id:
             client.delete_account(test_account_id)
-            logger.info("[验证] Cloudflare Temp Email 测试邮箱已清理")
+            logger.info("[验证] %s 测试邮箱已清理", label)
     except Exception as e:
-        logger.warning("[验证] Cloudflare Temp Email 清理测试邮箱失败: %s（不影响使用）", e)
+        logger.warning("[验证] %s 清理测试邮箱失败: %s（不影响使用）", label, e)
 
-    logger.info("[验证] Cloudflare Temp Email 配置验证通过")
+    logger.info("[验证] %s 配置验证通过", label)
     return True
 
 
 def _verify_mail_provider(provider: str | None = None):
+    default_service = get_default_mail_service()
+    if default_service:
+        return _verify_mail_service(default_service)
+
     resolved = provider or get_mail_provider_name()
     if resolved == MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL:
         return _verify_cloudflare_temp_email()
     return _verify_cloudmail()
+
+
+def _verify_mail_service(service: dict | None):
+    service = service or {}
+    provider = service.get("type")
+    if provider == MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL:
+        return _verify_cloudflare_temp_email(service)
+    return _verify_cloudmail(service)
+
+
+def _verify_mail_services(services: list[dict] | None = None):
+    items = services if services is not None else get_mail_services()
+    for service in items:
+        missing = get_mail_service_missing_fields(service)
+        if missing:
+            return False
+        if not _verify_mail_service(service):
+            return False
+    return True
 
 
 def _verify_cpa():

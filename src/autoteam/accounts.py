@@ -35,6 +35,10 @@ def is_account_disabled(acc: dict | None) -> bool:
 def _normalize_account(acc: dict) -> dict:
     normalized = dict(acc or {})
     normalized["disabled"] = bool(normalized.get("disabled", False))
+    service_id = normalized.get("mail_service_id")
+    normalized["mail_service_id"] = (
+        str(service_id).strip() if service_id is not None and str(service_id).strip() else None
+    )
     return normalized
 
 
@@ -63,7 +67,15 @@ def find_account(accounts, email):
     return None
 
 
-def add_account(email, password, cloudmail_account_id=None, *, mail_provider=None, mail_account_id=None):
+def add_account(
+    email,
+    password,
+    cloudmail_account_id=None,
+    *,
+    mail_provider=None,
+    mail_account_id=None,
+    mail_service_id=None,
+):
     """添加新账号"""
     accounts = load_accounts()
     if find_account(accounts, email):
@@ -73,10 +85,11 @@ def add_account(email, password, cloudmail_account_id=None, *, mail_provider=Non
         mail_account_id = cloudmail_account_id
     resolved_mail_provider = mail_provider or (get_mail_provider_name() if mail_account_id is not None else "")
     mail_fields = (
-        build_account_mail_fields(mail_account_id, provider=resolved_mail_provider)
+        build_account_mail_fields(mail_account_id, provider=resolved_mail_provider, service_id=mail_service_id)
         if mail_account_id is not None
         else {
             "mail_provider": resolved_mail_provider,
+            "mail_service_id": mail_service_id,
             "mail_account_id": None,
             "cloudmail_account_id": cloudmail_account_id,
         }

@@ -312,6 +312,7 @@ def sync_from_cpa():
     - 不删除本地账号记录，仅补充/更新 auth_file
     """
     from autoteam.accounts import STATUS_STANDBY, find_account, load_accounts, save_accounts
+    from autoteam.mail_provider import infer_mail_provider_from_email, infer_mail_service_from_email
 
     AUTH_DIR.mkdir(exist_ok=True)
 
@@ -461,9 +462,25 @@ def sync_from_cpa():
 
         acc = find_account(accounts, email)
         resolved_path = str(normalized_path.resolve())
+        inferred_service_id = infer_mail_service_from_email(email) or None
+        inferred_provider = infer_mail_provider_from_email(email)
         if acc:
+            acc_changed = False
             if acc.get("auth_file") != resolved_path:
                 acc["auth_file"] = resolved_path
+                acc_changed = True
+            if inferred_service_id and not acc.get("mail_service_id"):
+                acc["mail_service_id"] = inferred_service_id
+                acc_changed = True
+            if (
+                inferred_provider
+                and not acc.get("mail_provider")
+                and acc.get("mail_account_id") is None
+                and acc.get("cloudmail_account_id") is None
+            ):
+                acc["mail_provider"] = inferred_provider
+                acc_changed = True
+            if acc_changed:
                 changed_accounts = True
                 updated_accounts += 1
         else:
@@ -471,7 +488,8 @@ def sync_from_cpa():
                 {
                     "email": email,
                     "password": "",
-                    "mail_provider": "",
+                    "mail_service_id": inferred_service_id,
+                    "mail_provider": inferred_provider,
                     "mail_account_id": None,
                     "cloudmail_account_id": None,
                     "status": STATUS_STANDBY,
@@ -480,6 +498,13 @@ def sync_from_cpa():
                     "quota_resets_at": None,
                     "created_at": time.time(),
                     "last_active_at": None,
+                    "auth_retry_count": 0,
+                    "auth_last_error": None,
+                    "auth_last_error_detail": None,
+                    "auth_last_failed_at": None,
+                    "auth_retry_after": None,
+                    "auth_retry_paused": False,
+                    "disabled": False,
                 }
             )
             changed_accounts = True

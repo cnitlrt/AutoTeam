@@ -6,7 +6,12 @@ from pathlib import Path
 
 from autoteam.accounts import find_account, load_accounts, save_accounts
 from autoteam.admin_state import get_chatgpt_account_id
-from autoteam.mail_provider import get_account_mail_account_id, get_account_mail_provider, get_mail_client
+from autoteam.mail_provider import (
+    get_account_mail_account_id,
+    get_account_mail_provider,
+    get_account_mail_service_id,
+    get_mail_client_for_account,
+)
 from autoteam.sync_targets import delete_account_from_configured_targets
 from autoteam.sync_targets import sync_to_configured_targets as sync_to_cpa
 
@@ -177,9 +182,18 @@ def delete_managed_account(
             mail_account_id = get_account_mail_account_id(acc)
             if remove_cloudmail and mail_account_id is not None:
                 try:
+                    expected_service_id = get_account_mail_service_id(acc)
                     provider = get_account_mail_provider(acc)
-                    if mail_client is None or getattr(mail_client, "provider_name", "") != provider:
-                        own_mail_client = get_mail_client(provider)
+                    current_service_id = str(getattr(mail_client, "service_id", None) or "").strip()
+                    current_provider = str(getattr(mail_client, "provider_name", "") or "").strip()
+                    needs_new_client = mail_client is None
+                    if not needs_new_client and expected_service_id:
+                        needs_new_client = current_service_id != expected_service_id
+                    elif not needs_new_client:
+                        needs_new_client = current_provider != provider
+
+                    if needs_new_client:
+                        own_mail_client = get_mail_client_for_account(acc)
                         own_mail_client.login()
                         mail_client = own_mail_client
                     resp = mail_client.delete_account(mail_account_id)

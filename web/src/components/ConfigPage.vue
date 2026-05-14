@@ -28,7 +28,7 @@
         <div class="glass-card-soft p-4">
           <div class="text-2xl">☁️</div>
           <div class="mt-3 text-sm font-medium text-white">动态同步配置</div>
-          <div class="mt-1 text-xs leading-5 text-slate-400">先选择邮箱提供者 / 启用目标，再按状态展示对应配置。</div>
+          <div class="mt-1 text-xs leading-5 text-slate-400">可增删多个邮箱服务 / 启用远端目标，再按状态展示对应配置。</div>
         </div>
         <div class="glass-card-soft p-4">
           <div class="text-2xl">📝</div>
@@ -106,63 +106,112 @@
 
       <div v-else-if="selectedRuntimeCategory === 'cloudmail'" class="space-y-5">
         <div class="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <div class="mb-4 flex items-center justify-between gap-4">
+          <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <div class="text-sm font-medium text-white">邮箱提供者</div>
+              <div class="text-sm font-medium text-white">邮箱服务列表</div>
               <div class="mt-1 text-xs leading-5 text-slate-400">
-                先选择当前用于创建临时邮箱、收验证码和自动复用的邮箱后端。
+                可以同时添加多个 CloudMail / Cloudflare Temp Email 实例；默认服务用于新建账号，已有账号会优先复用自身绑定或唯一域名匹配到的服务。
               </div>
             </div>
             <div class="status-badge text-xs text-slate-400">
-              {{ selectedMailProvider === 'cloudflare_temp_email' ? 'Cloudflare Temp Email' : 'CloudMail' }}
+              {{ defaultMailService ? `默认：${mailServiceCardTitle(defaultMailService)}` : '未设置默认服务' }}
             </div>
           </div>
-          <select v-model="runtimeForm.MAIL_PROVIDER" class="input-dark">
-            <option value="cloudmail">CloudMail</option>
-            <option value="cloudflare_temp_email">Cloudflare Temp Email</option>
-          </select>
+
+          <div class="mt-4 flex flex-wrap gap-3">
+            <button class="btn-secondary" @click="addMailService('cloudmail')">
+              + 添加 CloudMail
+            </button>
+            <button class="btn-secondary" @click="addMailService('cloudflare_temp_email')">
+              + 添加 Cloudflare Temp Email
+            </button>
+          </div>
         </div>
 
-        <div v-if="selectedMailProvider === 'cloudmail'" class="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <div class="mb-4">
-            <div class="text-sm font-medium text-white">CloudMail</div>
-            <div class="mt-1 text-xs leading-5 text-slate-400">
-              填写 CloudMail API 地址、管理员账号和用于创建临时邮箱的域名。
+        <div
+          v-if="!mailServices.length"
+          class="rounded-2xl border border-dashed border-white/10 bg-white/5 px-4 py-5 text-sm text-slate-400"
+        >
+          还没有配置任何邮箱服务。先添加一个服务，再设置为默认服务。
+        </div>
+
+        <div
+          v-for="service in mailServices"
+          :key="service.id"
+          class="rounded-2xl border border-white/10 bg-white/5 p-5"
+        >
+          <div class="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div class="flex flex-wrap items-center gap-2">
+                <div class="text-sm font-medium text-white">{{ mailServiceCardTitle(service) }}</div>
+                <span class="status-badge text-[11px] text-slate-300">
+                  {{ mailServiceTypeLabel(service.type) }}
+                </span>
+                <span
+                  v-if="mailServiceDefault === service.id"
+                  class="status-badge border-emerald-400/20 bg-emerald-500/10 text-[11px] text-emerald-200"
+                >
+                  默认新建服务
+                </span>
+                <span
+                  v-if="!isMailServiceComplete(service)"
+                  class="status-badge border-amber-400/20 bg-amber-500/10 text-[11px] text-amber-200"
+                >
+                  待补全
+                </span>
+              </div>
+              <div class="mt-1 text-xs leading-5 text-slate-400">
+                {{ mailServiceDescription(service.type) }}
+              </div>
+            </div>
+
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-if="mailServiceDefault !== service.id"
+                class="btn-secondary"
+                @click="setDefaultMailService(service.id)"
+              >
+                设为默认
+              </button>
+              <button
+                class="btn-secondary border-red-500/30 text-red-300 hover:border-red-400/40 hover:text-red-200"
+                @click="removeMailService(service.id)"
+              >
+                删除
+              </button>
             </div>
           </div>
+
           <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <div v-for="field in cloudmailProviderFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+            <div class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
               <label class="mb-2 block text-sm font-medium text-slate-300">
-                {{ field.prompt }}
-                <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
+                服务名称
+                <span class="ml-1 text-xs font-normal text-slate-500">（可选）</span>
               </label>
               <input
-                v-model="runtimeForm[field.key]"
-                :type="fieldInputType(field.key)"
-                :placeholder="field.default || ''"
+                v-model="service.name"
+                type="text"
+                placeholder="例如：CloudMail #1"
                 class="input-dark"
               />
             </div>
-          </div>
-        </div>
 
-        <div v-else-if="selectedMailProvider === 'cloudflare_temp_email'" class="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <div class="mb-4">
-            <div class="text-sm font-medium text-white">Cloudflare Temp Email</div>
-            <div class="mt-1 text-xs leading-5 text-slate-400">
-              填写 Cloudflare Temp Email 管理端地址、管理员密码和默认邮箱域名。
-            </div>
-          </div>
-          <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <div v-for="field in cfTempEmailFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+            <div
+              v-for="field in mailServiceFields(service)"
+              :key="`${service.id}-${field.key}`"
+              class="rounded-2xl border border-white/10 bg-slate-950/25 p-4"
+            >
               <label class="mb-2 block text-sm font-medium text-slate-300">
-                {{ field.prompt }}
-                <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
+                {{ field.label }}
+                <span v-if="field.required" class="text-red-400">*</span>
+                <div v-if="field.hint" class="mt-1 text-[11px] font-normal text-slate-500 break-all">
+                  {{ field.hint }}
+                </div>
               </label>
               <input
-                v-model="runtimeForm[field.key]"
-                :type="fieldInputType(field.key)"
-                :placeholder="field.default || ''"
+                v-model="service[field.key]"
+                :type="field.inputType || 'text'"
+                :placeholder="field.placeholder || ''"
                 class="input-dark"
               />
             </div>
@@ -171,7 +220,7 @@
 
         <div class="flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 lg:flex-row lg:items-center lg:justify-between">
           <p class="text-xs leading-6 text-slate-400">
-            保存后会立即热加载；后续创建账号、自动收验证码和自动复用都会改用当前选择的邮箱提供者。
+            保存后会立即热加载。新建账号会使用默认服务；已有账号会优先按 `mail_service_id` 或唯一邮箱域名匹配对应服务。
           </p>
           <button
             @click="saveRuntimeConfig"
@@ -523,11 +572,11 @@ const runtimeCategoryKeys = {
 const runtimeCategoryMeta = {
   cloudmail: {
     icon: '📧',
-    badge: 'Mail Provider',
+    badge: 'Mail Services',
     title: '邮箱服务配置',
-    description: '配置自动注册和收验证码所需的邮箱后端。可以在 CloudMail 和 Cloudflare Temp Email 之间切换。',
-    note: '带 * 的项会直接影响账号池操作；只有当前选中的邮箱提供者配置会被视为运行时必填。',
-    footer: '邮箱提供者配置保存后会立即热加载；之后的注册、复用和验证码轮询会直接使用新配置。',
+    description: '配置自动注册和收验证码所需的邮箱后端。现在支持同时维护多个 CloudMail / Cloudflare Temp Email 实例，并指定默认新建服务。',
+    note: '已有账号会优先按账号自身保存的 mail_service_id 或唯一邮箱域名匹配服务；存在歧义时不会盲猜。',
+    footer: '邮箱服务配置保存后会立即热加载；之后的新建、复用和验证码轮询都会按最新服务列表执行。',
   },
   sync: {
     icon: '☁️',
@@ -568,6 +617,8 @@ const proxyExpanded = ref(false)
 
 const runtimeFields = ref([])
 const runtimeForm = reactive({})
+const mailServices = ref([])
+const mailServiceDefault = ref('')
 const runtimeLoading = ref(false)
 const runtimeSaving = ref(false)
 const runtimeSaved = ref(false)
@@ -598,6 +649,57 @@ const sub2apiFieldHints = {
   SUB2API_OVERWRITE_ACCOUNT_SETTINGS: 'ENV: SUB2API_OVERWRITE_ACCOUNT_SETTINGS · AutoTeam overwrite switch',
 }
 
+const mailServiceFieldMeta = {
+  cloudmail: [
+    {
+      key: 'base_url',
+      label: 'CloudMail API 地址',
+      required: true,
+      placeholder: 'https://your-cloudmail.com/api',
+    },
+    {
+      key: 'email',
+      label: 'CloudMail 登录邮箱',
+      required: true,
+      placeholder: 'admin@example.com',
+    },
+    {
+      key: 'password',
+      label: 'CloudMail 登录密码',
+      required: true,
+      inputType: 'password',
+    },
+    {
+      key: 'domain',
+      label: 'CloudMail 邮箱域名',
+      required: true,
+      placeholder: 'example.com 或 @example.com',
+      hint: '用于自动匹配已有账号所属邮箱服务',
+    },
+  ],
+  cloudflare_temp_email: [
+    {
+      key: 'base_url',
+      label: 'Cloudflare Temp Email API 地址',
+      required: true,
+      placeholder: 'https://temp-email-api.example.com',
+    },
+    {
+      key: 'admin_password',
+      label: '管理员密码',
+      required: true,
+      inputType: 'password',
+    },
+    {
+      key: 'domain',
+      label: '邮箱域名',
+      required: true,
+      placeholder: 'mail.example.com',
+      hint: '用于自动匹配已有账号所属邮箱服务',
+    },
+  ],
+}
+
 const selectedRuntimeCategory = computed(() => runtimeCategoryKeys[visualCategory.value] ? visualCategory.value : '')
 const currentRuntimeCategoryMeta = computed(() => runtimeCategoryMeta[selectedRuntimeCategory.value] || null)
 
@@ -618,9 +720,7 @@ function fieldsByKeys(keys) {
 const securityFields = computed(() => fieldsByKeys(runtimeCategoryKeys.security))
 const proxyFields = computed(() => fieldsByKeys(runtimeCategoryKeys.proxy))
 const syncToggleFields = computed(() => fieldsByKeys(['SYNC_TARGET_CPA', 'SYNC_TARGET_SUB2API']))
-const selectedMailProvider = computed(() => String(runtimeForm.MAIL_PROVIDER || 'cloudmail').toLowerCase() === 'cloudflare_temp_email' ? 'cloudflare_temp_email' : 'cloudmail')
-const cloudmailProviderFields = computed(() => fieldsByKeys(['CLOUDMAIL_BASE_URL', 'CLOUDMAIL_EMAIL', 'CLOUDMAIL_PASSWORD', 'CLOUDMAIL_DOMAIN']))
-const cfTempEmailFields = computed(() => fieldsByKeys(['CF_TEMP_EMAIL_BASE_URL', 'CF_TEMP_EMAIL_ADMIN_PASSWORD', 'CF_TEMP_EMAIL_DOMAIN']))
+const defaultMailService = computed(() => mailServices.value.find(service => service.id === mailServiceDefault.value) || null)
 
 const syncCpaEnabled = computed(() => String(runtimeForm.SYNC_TARGET_CPA || '').toLowerCase() === 'true')
 const syncSub2apiEnabled = computed(() => String(runtimeForm.SYNC_TARGET_SUB2API || '').toLowerCase() === 'true')
@@ -643,11 +743,6 @@ const syncSub2apiDefaultFields = computed(() => syncSub2apiEnabled.value
   : [])
 
 const currentRuntimeFields = computed(() => {
-  if (selectedRuntimeCategory.value === 'cloudmail') {
-    return selectedMailProvider.value === 'cloudflare_temp_email'
-      ? cfTempEmailFields.value
-      : cloudmailProviderFields.value
-  }
   if (selectedRuntimeCategory.value === 'security') {
     return securityFields.value
   }
@@ -708,19 +803,28 @@ const currentRuntimeStatus = computed(() => {
   }
 
   if (selectedRuntimeCategory.value === 'cloudmail') {
-    const providerFields = selectedMailProvider.value === 'cloudflare_temp_email'
-      ? cfTempEmailFields.value
-      : cloudmailProviderFields.value
-    const configured = providerFields.length > 0 && providerFields.every(field => !isRuntimeRequired(field) || field.configured)
-    return configured
-      ? {
-          label: '已配置',
-          class: 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200',
-        }
-      : {
-          label: '未配置',
-          class: 'border-red-400/20 bg-red-500/10 text-red-200',
-        }
+    if (!mailServices.value.length) {
+      return {
+        label: '未配置',
+        class: 'border-red-400/20 bg-red-500/10 text-red-200',
+      }
+    }
+    if (!defaultMailService.value) {
+      return {
+        label: '未设默认',
+        class: 'border-amber-400/20 bg-amber-500/10 text-amber-200',
+      }
+    }
+    if (mailServices.value.some(service => !isMailServiceComplete(service))) {
+      return {
+        label: '待补全',
+        class: 'border-amber-400/20 bg-amber-500/10 text-amber-200',
+      }
+    }
+    return {
+      label: '已配置',
+      class: 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200',
+    }
   }
 
   const fields = currentRuntimeFields.value
@@ -792,6 +896,104 @@ function fieldInputStep(key) {
   return undefined
 }
 
+function createMailService(type = 'cloudmail') {
+  const normalizedType = String(type || '').toLowerCase() === 'cloudflare_temp_email'
+    ? 'cloudflare_temp_email'
+    : 'cloudmail'
+  const randomPart = Math.random().toString(36).slice(2, 8)
+  return {
+    id: `mailsvc-${Date.now().toString(36)}-${randomPart}`,
+    type: normalizedType,
+    name: '',
+    base_url: '',
+    domain: '',
+    email: '',
+    password: '',
+    admin_password: '',
+  }
+}
+
+function normalizeMailService(service) {
+  const template = createMailService(service?.type)
+  return {
+    ...template,
+    id: String(service?.id || template.id),
+    name: String(service?.name || ''),
+    base_url: String(service?.base_url || ''),
+    domain: String(service?.domain || ''),
+    email: String(service?.email || ''),
+    password: String(service?.password || ''),
+    admin_password: String(service?.admin_password || ''),
+  }
+}
+
+function sanitizeMailService(service) {
+  const normalized = normalizeMailService(service)
+  normalized.domain = normalized.domain.trim()
+  if (normalized.type === 'cloudflare_temp_email') {
+    delete normalized.email
+    delete normalized.password
+  } else {
+    delete normalized.admin_password
+  }
+  return normalized
+}
+
+function mailServiceTypeLabel(type) {
+  return type === 'cloudflare_temp_email' ? 'Cloudflare Temp Email' : 'CloudMail'
+}
+
+function mailServiceDescription(type) {
+  return type === 'cloudflare_temp_email'
+    ? '填写管理端 API 地址、管理员密码和对应邮箱域名。'
+    : '填写 CloudMail API 地址、管理员账号密码和对应邮箱域名。'
+}
+
+function mailServiceFields(service) {
+  return mailServiceFieldMeta[service?.type] || mailServiceFieldMeta.cloudmail
+}
+
+function isMailServiceComplete(service) {
+  return mailServiceFields(service).every(field => {
+    if (!field.required) {
+      return true
+    }
+    return String(service?.[field.key] || '').trim() !== ''
+  })
+}
+
+function mailServiceCardTitle(service) {
+  const name = String(service?.name || '').trim()
+  if (name) {
+    return name
+  }
+  const label = mailServiceTypeLabel(service?.type)
+  const domain = String(service?.domain || '').trim()
+  return domain ? `${label} (${domain})` : label
+}
+
+function ensureMailServiceDefault() {
+  const existingIds = new Set(mailServices.value.map(service => service.id))
+  if (mailServiceDefault.value && existingIds.has(mailServiceDefault.value)) {
+    return
+  }
+  mailServiceDefault.value = mailServices.value[0]?.id || ''
+}
+
+function addMailService(type) {
+  mailServices.value = [...mailServices.value, createMailService(type)]
+  ensureMailServiceDefault()
+}
+
+function removeMailService(id) {
+  mailServices.value = mailServices.value.filter(service => service.id !== id)
+  ensureMailServiceDefault()
+}
+
+function setDefaultMailService(id) {
+  mailServiceDefault.value = id
+}
+
 function isRuntimeRequired(field) {
   return Boolean(field?.runtime_required) || runtimeRequiredKeys.has(field?.key)
 }
@@ -813,6 +1015,11 @@ async function loadRuntimeConfig() {
   try {
     const result = await api.getRuntimeConfig()
     runtimeFields.value = result.fields || []
+    mailServices.value = Array.isArray(result.mail_services)
+      ? result.mail_services.map(service => normalizeMailService(service))
+      : []
+    mailServiceDefault.value = String(result.mail_service_default || '')
+    ensureMailServiceDefault()
 
     for (const key of Object.keys(runtimeForm)) {
       if (!runtimeFields.value.find(field => field.key === key)) {
@@ -839,6 +1046,12 @@ async function saveRuntimeConfig() {
       const value = runtimeForm[field.key]
       payload[field.key] = value == null ? '' : String(value)
     }
+    const sanitizedServices = mailServices.value.map(service => sanitizeMailService(service))
+    const sanitizedDefault = sanitizedServices.some(service => service.id === mailServiceDefault.value)
+      ? mailServiceDefault.value
+      : sanitizedServices[0]?.id || ''
+    payload.mail_services = sanitizedServices
+    payload.mail_service_default = sanitizedDefault
     const result = await api.saveRuntimeConfig(payload)
     if (result.api_key) {
       setApiKey(result.api_key)

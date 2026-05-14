@@ -36,3 +36,46 @@ def test_sync_to_cpa_skips_disabled_accounts_and_deletes_remote_copy(monkeypatch
 
     assert uploaded == [enabled_auth.name]
     assert deleted == [disabled_auth.name]
+
+
+def test_sync_from_cpa_backfills_mail_service_binding(monkeypatch, tmp_path):
+    auth_dir = tmp_path / "auths"
+    auth_dir.mkdir()
+
+    monkeypatch.setattr(cpa_sync, "AUTH_DIR", auth_dir)
+    monkeypatch.setattr(cpa_sync, "ensure_auth_dir", lambda: auth_dir)
+    monkeypatch.setattr(cpa_sync, "ensure_auth_file_permissions", lambda _path: None)
+    monkeypatch.setattr(cpa_sync, "_cleanup_local_duplicates", lambda accounts: (0, False))
+    monkeypatch.setattr(
+        cpa_sync,
+        "list_cpa_files",
+        lambda: [{"name": "codex-user@pool.example.com-team-a.json", "email": "user@pool.example.com"}],
+    )
+    monkeypatch.setattr(
+        cpa_sync,
+        "download_from_cpa",
+        lambda _name: (
+            '{"type":"codex","email":"user@pool.example.com","access_token":"token","refresh_token":"refresh","expires_at":"2099-01-01T00:00:00Z"}'
+        ),
+    )
+    monkeypatch.setattr(cpa_sync, "delete_from_cpa", lambda _name: True)
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: [])
+    saved = {}
+    monkeypatch.setattr(
+        "autoteam.accounts.save_accounts",
+        lambda items: saved.setdefault("accounts", [dict(item) for item in items]),
+    )
+    monkeypatch.setattr(
+        "autoteam.mail_provider.infer_mail_service_from_email",
+        lambda email: "cm-1" if email == "user@pool.example.com" else "",
+    )
+    monkeypatch.setattr(
+        "autoteam.mail_provider.infer_mail_provider_from_email",
+        lambda email: "cloudmail" if email == "user@pool.example.com" else "",
+    )
+
+    result = cpa_sync.sync_from_cpa()
+
+    assert result["accounts_added"] == 1
+    assert saved["accounts"][0]["mail_service_id"] == "cm-1"
+    assert saved["accounts"][0]["mail_provider"] == "cloudmail"

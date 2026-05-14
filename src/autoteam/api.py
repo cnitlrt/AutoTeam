@@ -77,6 +77,10 @@ def check_auth(request: Request):
 
 class SetupConfig(BaseModel):
     MAIL_PROVIDER: str = "cloudmail"
+    MAIL_SERVICES_JSON: str = ""
+    MAIL_SERVICE_DEFAULT: str = ""
+    mail_services: list[dict] = []
+    mail_service_default: str = ""
     CLOUDMAIL_BASE_URL: str = ""
     CLOUDMAIL_EMAIL: str = ""
     CLOUDMAIL_PASSWORD: str = ""
@@ -111,6 +115,16 @@ class SourceConfig(BaseModel):
 
 
 _RUNTIME_CONFIG_CLEARABLE_FIELDS = {
+    "MAIL_PROVIDER",
+    "MAIL_SERVICES_JSON",
+    "MAIL_SERVICE_DEFAULT",
+    "CLOUDMAIL_BASE_URL",
+    "CLOUDMAIL_EMAIL",
+    "CLOUDMAIL_PASSWORD",
+    "CLOUDMAIL_DOMAIN",
+    "CF_TEMP_EMAIL_BASE_URL",
+    "CF_TEMP_EMAIL_ADMIN_PASSWORD",
+    "CF_TEMP_EMAIL_DOMAIN",
     "SUB2API_GROUP",
     "SUB2API_PROXY",
     "SUB2API_MODEL_WHITELIST",
@@ -130,6 +144,8 @@ _SYNC_TARGET_TOGGLE_KEYS = ("SYNC_TARGET_CPA", "SYNC_TARGET_SUB2API")
 
 _ALL_RUNTIME_ENV_KEYS = [
     "MAIL_PROVIDER",
+    "MAIL_SERVICES_JSON",
+    "MAIL_SERVICE_DEFAULT",
     "CLOUDMAIL_BASE_URL",
     "CLOUDMAIL_EMAIL",
     "CLOUDMAIL_PASSWORD",
@@ -225,6 +241,17 @@ def _runtime_required_keys(env: dict[str, str] | None = None) -> set[str]:
     return required
 
 
+def _format_mail_service_missing_fields(missing: list[str]) -> str:
+    prompt_map = {
+        "base_url": "base_url",
+        "email": "email",
+        "password": "password",
+        "admin_password": "admin_password",
+        "domain": "domain",
+    }
+    return "、".join(prompt_map.get(field, field) for field in missing)
+
+
 def _require_runtime_configs(
     keys: tuple[str, ...] | list[str], action_label: str, *, env: dict[str, str] | None = None
 ):
@@ -239,9 +266,37 @@ def _require_runtime_configs(
 def _require_mail_provider_configs(
     action_label: str, *, provider: str | None = None, env: dict[str, str] | None = None
 ):
-    from autoteam.mail_provider import get_mail_provider_name, get_mail_provider_prompt, get_mail_provider_required_keys
+    from autoteam.mail_provider import (
+        get_default_mail_service,
+        get_mail_provider_name,
+        get_mail_provider_prompt,
+        get_mail_provider_required_keys,
+        get_mail_service_display_name,
+        get_mail_service_missing_fields,
+        get_mail_services,
+        normalize_mail_provider,
+    )
 
     env_values = env or _current_runtime_env()
+    default_service = get_default_mail_service(env_values)
+    if default_service:
+        resolved_service = default_service
+        if provider:
+            target_provider = normalize_mail_provider(provider, default="")
+            matches = [item for item in get_mail_services(env_values) if item.get("type") == target_provider]
+            if len(matches) == 1:
+                resolved_service = matches[0]
+
+        missing_fields = get_mail_service_missing_fields(resolved_service)
+        if missing_fields:
+            label = get_mail_service_display_name(resolved_service)
+            detail = _format_mail_service_missing_fields(missing_fields)
+            raise HTTPException(
+                status_code=400,
+                detail=f"{action_label} 前请先在配置面板补全邮箱服务（{label}）配置：{detail}",
+            )
+        return
+
     resolved_provider = provider or get_mail_provider_name(env_values)
     missing = _missing_runtime_configs(get_mail_provider_required_keys(resolved_provider), env=env_values)
     if not missing:
@@ -283,10 +338,31 @@ def _require_pool_operation_configs(action_label: str):
 
 
 def _require_account_mail_configs(account: dict, action_label: str):
-    from autoteam.mail_provider import get_account_mail_provider
+    from autoteam.mail_provider import (
+        get_account_mail_service,
+        get_mail_service_display_name,
+        get_mail_service_missing_fields,
+    )
 
-    provider = get_account_mail_provider(account)
-    _require_mail_provider_configs(action_label, provider=provider, env=_current_runtime_env())
+    env = _current_runtime_env()
+    service = get_account_mail_service(account, env=env)
+    if not service:
+        email = str((account or {}).get("email") or "").strip() or "<unknown>"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{action_label} 前无法唯一确定账号 {email} 对应的邮箱服务；"
+                "请检查 mail_service_id，或确保该邮箱域名只匹配一个已配置邮箱服务"
+            ),
+        )
+
+    missing_fields = get_mail_service_missing_fields(service)
+    if not missing_fields:
+        return
+
+    label = get_mail_service_display_name(service)
+    detail = _format_mail_service_missing_fields(missing_fields)
+    raise HTTPException(status_code=400, detail=f"{action_label} 前请先补全邮箱服务（{label}）配置：{detail}")
 
 
 def _require_cpa_configs(action_label: str):
@@ -319,7 +395,7 @@ def _require_sync_target_configs(action_label: str):
 
 
 def _collect_config_fields(*, include_values: bool = False, configs=None):
-    from autoteam.mail_provider import get_mail_provider_name
+    from autoteam.mail_provider import get_default_mail_service_id, get_mail_provider_name, get_mail_services
     from autoteam.setup_wizard import REQUIRED_CONFIGS, _read_env
 
     env = _read_env()
@@ -328,6 +404,8 @@ def _collect_config_fields(*, include_values: bool = False, configs=None):
     target_states = _effective_sync_target_states(merged_env)
     runtime_required_keys = _runtime_required_keys(merged_env)
     mail_provider = get_mail_provider_name(merged_env)
+    mail_services = get_mail_services(merged_env)
+    mail_service_default = get_default_mail_service_id(merged_env, services=mail_services)
     config_items = configs or REQUIRED_CONFIGS
     fields = []
     all_ok = True
@@ -358,7 +436,12 @@ def _collect_config_fields(*, include_values: bool = False, configs=None):
             field["value"] = raw_value if raw_value != "" else default
             field["runtime_required"] = key in runtime_required_keys
         fields.append(field)
-    return {"configured": all_ok, "fields": fields}
+    return {
+        "configured": all_ok,
+        "fields": fields,
+        "mail_services": mail_services,
+        "mail_service_default": mail_service_default,
+    }
 
 
 def _reload_runtime_config_modules():
@@ -653,26 +736,73 @@ def _maybe_reload_runtime_config_from_env_file(*, force: bool = False):
 def _verify_runtime_integrations(
     previous_env: dict[str, str | None] | None = None, *, env: dict[str, object] | None = None
 ):
-    from autoteam.mail_provider import get_mail_provider_name, get_mail_provider_prompt, get_mail_provider_required_keys
-    from autoteam.setup_wizard import _verify_cpa, _verify_mail_provider, _verify_sub2api
+    from autoteam.mail_provider import (
+        get_default_mail_service,
+        get_mail_provider_name,
+        get_mail_provider_prompt,
+        get_mail_service_display_name,
+        get_mail_service_missing_fields,
+        get_mail_services,
+        normalize_mail_services,
+    )
+    from autoteam.setup_wizard import _verify_cpa, _verify_mail_provider, _verify_mail_service, _verify_sub2api
 
     errors = []
     runtime_env = dict(env or os.environ)
-    mail_provider = get_mail_provider_name(runtime_env)
-    mail_keys = tuple(get_mail_provider_required_keys(mail_provider))
-    cpa_keys = ("CPA_URL", "CPA_KEY")
-    sub2api_keys = ("SUB2API_URL", "SUB2API_EMAIL", "SUB2API_PASSWORD")
+    previous = previous_env or {}
+    mail_keys = (
+        "MAIL_PROVIDER",
+        "MAIL_SERVICES_JSON",
+        "MAIL_SERVICE_DEFAULT",
+        "CLOUDMAIL_BASE_URL",
+        "CLOUDMAIL_EMAIL",
+        "CLOUDMAIL_PASSWORD",
+        "CLOUDMAIL_DOMAIN",
+        "CF_TEMP_EMAIL_BASE_URL",
+        "CF_TEMP_EMAIL_ADMIN_PASSWORD",
+        "CF_TEMP_EMAIL_DOMAIN",
+    )
+    cpa_keys = ("SYNC_TARGET_CPA", "CPA_URL", "CPA_KEY")
+    sub2api_keys = ("SYNC_TARGET_SUB2API", "SUB2API_URL", "SUB2API_EMAIL", "SUB2API_PASSWORD")
 
-    mail_values = [runtime_env.get(key, "") for key in mail_keys]
-    cpa_values = [runtime_env.get(key, "") for key in cpa_keys]
-    sub2api_values = [runtime_env.get(key, "") for key in sub2api_keys]
+    def _changed(keys: tuple[str, ...]) -> bool:
+        if previous_env is None:
+            return True
+        for key in keys:
+            before = "" if previous.get(key) is None else str(previous.get(key))
+            after = "" if runtime_env.get(key) is None else str(runtime_env.get(key))
+            if before != after:
+                return True
+        return False
+
+    cpa_values = [runtime_env.get(key, "") for key in cpa_keys[1:]]
+    sub2api_values = [runtime_env.get(key, "") for key in sub2api_keys[1:]]
     sync_states = _effective_sync_target_states(runtime_env)
 
-    if mail_keys and all(mail_values) and not _verify_mail_provider(mail_provider):
-        errors.append(f"{get_mail_provider_prompt(mail_provider)} 连接失败")
-    if sync_states.get("cpa") and all(cpa_values) and not _verify_cpa():
+    if _changed(mail_keys):
+        raw_structured_services = normalize_mail_services(runtime_env.get("MAIL_SERVICES_JSON"))
+        if raw_structured_services:
+            default_service = get_default_mail_service(runtime_env, services=raw_structured_services)
+            if not default_service:
+                errors.append("邮箱服务缺少默认服务")
+            for service in raw_structured_services:
+                missing_fields = get_mail_service_missing_fields(service)
+                label = get_mail_service_display_name(service)
+                if missing_fields:
+                    errors.append(f"{label} 缺少配置: {_format_mail_service_missing_fields(missing_fields)}")
+                    continue
+                if not _verify_mail_service(service):
+                    errors.append(f"{label} 连接失败")
+        else:
+            mail_services = get_mail_services(runtime_env)
+            if mail_services:
+                provider = get_mail_provider_name(runtime_env)
+                if not _verify_mail_provider(provider):
+                    errors.append(f"{get_mail_provider_prompt(provider)} 连接失败")
+
+    if _changed(cpa_keys) and sync_states.get("cpa") and all(cpa_values) and not _verify_cpa():
         errors.append("CPA 连接失败")
-    if sync_states.get("sub2api") and all(sub2api_values) and not _verify_sub2api():
+    if _changed(sub2api_keys) and sync_states.get("sub2api") and all(sub2api_values) and not _verify_sub2api():
         errors.append("Sub2API 连接失败")
     if errors:
         api_key = ""
@@ -686,13 +816,61 @@ def _save_runtime_config(data: dict[str, str]):
     """保存运行时配置到 .env，并在当前进程立即生效。"""
     import secrets as _secrets
 
-    from autoteam.mail_provider import normalize_mail_provider
+    from autoteam.mail_provider import (
+        get_default_mail_service,
+        get_mail_service_legacy_env_values,
+        normalize_mail_provider,
+        normalize_mail_services,
+        serialize_mail_services,
+    )
     from autoteam.setup_wizard import REQUIRED_CONFIGS, _write_env
 
     env_keys = [key for key, _prompt, _default, _optional in REQUIRED_CONFIGS]
     existing = {key: os.environ.get(key, "") for key in env_keys}
     merged = {key: data.get(key, existing.get(key, "")) for key in env_keys}
-    merged["MAIL_PROVIDER"] = normalize_mail_provider(merged.get("MAIL_PROVIDER") or existing.get("MAIL_PROVIDER"))
+    use_structured_mail_services = "mail_services" in data or "mail_service_default" in data
+    normalized_services = normalize_mail_services(
+        data.get("mail_services") if use_structured_mail_services else merged.get("MAIL_SERVICES_JSON")
+    )
+
+    default_service_id = ""
+    if normalized_services:
+        requested_default = str(
+            data.get("mail_service_default")
+            if use_structured_mail_services
+            else merged.get("MAIL_SERVICE_DEFAULT") or existing.get("MAIL_SERVICE_DEFAULT") or ""
+        ).strip()
+        service_ids = {str(item.get("id") or "") for item in normalized_services}
+        default_service_id = (
+            requested_default if requested_default in service_ids else str(normalized_services[0].get("id") or "")
+        )
+
+    if use_structured_mail_services or normalized_services:
+        merged["MAIL_SERVICES_JSON"] = serialize_mail_services(normalized_services)
+        merged["MAIL_SERVICE_DEFAULT"] = default_service_id
+
+        default_service = get_default_mail_service(
+            {
+                **existing,
+                **merged,
+                "MAIL_SERVICES_JSON": merged["MAIL_SERVICES_JSON"],
+                "MAIL_SERVICE_DEFAULT": default_service_id,
+            },
+            services=normalized_services,
+        )
+        if default_service:
+            merged.update(get_mail_service_legacy_env_values(default_service))
+        else:
+            merged["MAIL_PROVIDER"] = ""
+            merged["CLOUDMAIL_BASE_URL"] = ""
+            merged["CLOUDMAIL_EMAIL"] = ""
+            merged["CLOUDMAIL_PASSWORD"] = ""
+            merged["CLOUDMAIL_DOMAIN"] = ""
+            merged["CF_TEMP_EMAIL_BASE_URL"] = ""
+            merged["CF_TEMP_EMAIL_ADMIN_PASSWORD"] = ""
+            merged["CF_TEMP_EMAIL_DOMAIN"] = ""
+    else:
+        merged["MAIL_PROVIDER"] = normalize_mail_provider(merged.get("MAIL_PROVIDER") or existing.get("MAIL_PROVIDER"))
 
     if not merged.get("API_KEY"):
         merged["API_KEY"] = _secrets.token_urlsafe(24)
@@ -745,7 +923,7 @@ def get_setup_status():
 @app.post("/api/setup/save")
 def post_setup_save(config: SetupConfig):
     """保存配置到 .env 并验证连通性"""
-    return _save_runtime_config(config.model_dump())
+    return _save_runtime_config(config.model_dump(exclude_unset=True))
 
 
 @app.get("/api/config/runtime")
@@ -764,7 +942,7 @@ def get_runtime_config_source():
 @app.put("/api/config/runtime")
 def put_runtime_config(config: SetupConfig):
     """登录后修改 CloudMail / CPA / Sub2API / 代理等运行时配置。"""
-    return _save_runtime_config(config.model_dump())
+    return _save_runtime_config(config.model_dump(exclude_unset=True))
 
 
 @app.put("/api/config/source")

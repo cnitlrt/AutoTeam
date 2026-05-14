@@ -1,3 +1,7 @@
+import json
+
+import pytest
+
 from autoteam import mail_provider
 
 
@@ -39,3 +43,86 @@ def test_get_account_mail_provider_returns_empty_when_domains_are_ambiguous():
     }
 
     assert mail_provider.infer_mail_provider_from_email("user@same.example.com", env=env) == ""
+
+
+def test_structured_mail_services_resolve_default_and_provider():
+    env = {
+        "MAIL_SERVICES_JSON": json.dumps(
+            [
+                {
+                    "id": "cm-1",
+                    "type": "cloudmail",
+                    "base_url": "https://mail-1.example.com/api",
+                    "email": "admin@one.example.com",
+                    "password": "secret-1",
+                    "domain": "one.example.com",
+                },
+                {
+                    "id": "cf-1",
+                    "type": "cloudflare_temp_email",
+                    "base_url": "https://temp.example.com",
+                    "admin_password": "secret-2",
+                    "domain": "two.example.com",
+                },
+            ]
+        ),
+        "MAIL_SERVICE_DEFAULT": "cf-1",
+        "MAIL_PROVIDER": "cloudmail",
+    }
+
+    services = mail_provider.get_mail_services(env)
+
+    assert [item["id"] for item in services] == ["cm-1", "cf-1"]
+    assert mail_provider.get_default_mail_service_id(env, services=services) == "cf-1"
+    assert mail_provider.get_mail_provider_name(env) == "cloudflare_temp_email"
+    assert mail_provider.get_mail_domain(env=env) == "two.example.com"
+
+
+def test_get_account_mail_service_id_falls_back_to_single_configured_service():
+    env = {
+        "MAIL_SERVICES_JSON": json.dumps(
+            [
+                {
+                    "id": "cm-1",
+                    "type": "cloudmail",
+                    "base_url": "https://mail.example.com/api",
+                    "email": "admin@example.com",
+                    "password": "secret",
+                    "domain": "pool.example.com",
+                }
+            ]
+        )
+    }
+
+    assert mail_provider.get_account_mail_service_id({"email": "user@unknown.example.com"}, env=env) == "cm-1"
+    client = mail_provider.get_mail_client_for_account({"email": "user@unknown.example.com"}, env=env)
+    assert getattr(client, "service_id", None) == "cm-1"
+    assert getattr(client, "provider_name", "") == "cloudmail"
+
+
+def test_get_mail_client_for_account_rejects_ambiguous_service_selection():
+    env = {
+        "MAIL_SERVICES_JSON": json.dumps(
+            [
+                {
+                    "id": "cm-1",
+                    "type": "cloudmail",
+                    "base_url": "https://mail-1.example.com/api",
+                    "email": "admin@one.example.com",
+                    "password": "secret-1",
+                    "domain": "one.example.com",
+                },
+                {
+                    "id": "cm-2",
+                    "type": "cloudmail",
+                    "base_url": "https://mail-2.example.com/api",
+                    "email": "admin@two.example.com",
+                    "password": "secret-2",
+                    "domain": "two.example.com",
+                },
+            ]
+        )
+    }
+
+    with pytest.raises(ValueError, match="无法唯一确定账号 user@other.example.com 的邮箱服务"):
+        mail_provider.get_mail_client_for_account({"email": "user@other.example.com"}, env=env)

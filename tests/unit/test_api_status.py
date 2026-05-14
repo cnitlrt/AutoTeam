@@ -419,6 +419,112 @@ def test_get_runtime_config_switches_required_mail_fields_by_provider(tmp_path, 
     assert fields["CLOUDMAIL_EMAIL"]["runtime_required"] is False
 
 
+def test_get_runtime_config_exposes_structured_mail_services(tmp_path, monkeypatch):
+    services = [
+        {
+            "id": "cm-1",
+            "type": "cloudmail",
+            "base_url": "https://mail.example.com/api",
+            "email": "admin@example.com",
+            "password": "secret-1",
+            "domain": "pool.example.com",
+        },
+        {
+            "id": "cf-1",
+            "type": "cloudflare_temp_email",
+            "base_url": "https://temp.example.com",
+            "admin_password": "secret-2",
+            "domain": "mail.example.com",
+        },
+    ]
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                f"MAIL_SERVICES_JSON={json.dumps(services, separators=(',', ':'))}",
+                "MAIL_SERVICE_DEFAULT=cf-1",
+                "API_KEY=runtime-key",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("autoteam.setup_wizard.ENV_FILE", env_file)
+    for key in (
+        "MAIL_SERVICES_JSON",
+        "MAIL_SERVICE_DEFAULT",
+        "MAIL_PROVIDER",
+        "CLOUDMAIL_BASE_URL",
+        "CLOUDMAIL_EMAIL",
+        "CLOUDMAIL_PASSWORD",
+        "CLOUDMAIL_DOMAIN",
+        "CF_TEMP_EMAIL_BASE_URL",
+        "CF_TEMP_EMAIL_ADMIN_PASSWORD",
+        "CF_TEMP_EMAIL_DOMAIN",
+        "API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    result = api.get_runtime_config()
+
+    assert [item["id"] for item in result["mail_services"]] == ["cm-1", "cf-1"]
+    assert result["mail_service_default"] == "cf-1"
+    fields = {field["key"]: field for field in result["fields"]}
+    assert fields["MAIL_PROVIDER"]["value"] == "cloudflare_temp_email"
+
+
+def test_put_runtime_config_saves_structured_mail_services_and_mirrors_default(monkeypatch):
+    written = {}
+
+    services = [
+        {
+            "id": "cm-1",
+            "type": "cloudmail",
+            "base_url": "https://mail.example.com/api",
+            "email": "admin@example.com",
+            "password": "secret-1",
+            "domain": "pool.example.com",
+        },
+        {
+            "id": "cf-1",
+            "type": "cloudflare_temp_email",
+            "base_url": "https://temp.example.com",
+            "admin_password": "secret-2",
+            "domain": "mail.example.com",
+        },
+    ]
+
+    monkeypatch.setattr("autoteam.setup_wizard._write_env", lambda key, value: written.__setitem__(key, value))
+    monkeypatch.setattr("autoteam.setup_wizard._verify_mail_service", lambda service=None: True)
+    monkeypatch.setattr("importlib.reload", lambda module: module)
+    monkeypatch.setattr(api, "API_KEY", "old-key")
+    monkeypatch.setenv("API_KEY", "old-key")
+    monkeypatch.setenv("CLOUDMAIL_BASE_URL", "https://old-mail.example.com/api")
+    monkeypatch.setenv("CLOUDMAIL_EMAIL", "old@example.com")
+    monkeypatch.setenv("CLOUDMAIL_PASSWORD", "old-secret")
+    monkeypatch.setenv("CLOUDMAIL_DOMAIN", "@old.example.com")
+
+    result = api.put_runtime_config(
+        api.SetupConfig(
+            API_KEY="old-key",
+            mail_services=services,
+            mail_service_default="cf-1",
+        )
+    )
+
+    assert result["message"] == "配置保存成功"
+    assert json.loads(written["MAIL_SERVICES_JSON"])[1]["id"] == "cf-1"
+    assert written["MAIL_SERVICE_DEFAULT"] == "cf-1"
+    assert written["MAIL_PROVIDER"] == "cloudflare_temp_email"
+    assert written["CF_TEMP_EMAIL_BASE_URL"] == "https://temp.example.com"
+    assert written["CF_TEMP_EMAIL_ADMIN_PASSWORD"] == "secret-2"
+    assert written["CF_TEMP_EMAIL_DOMAIN"] == "mail.example.com"
+    assert written["CLOUDMAIL_BASE_URL"] == ""
+    assert written["CLOUDMAIL_EMAIL"] == ""
+    assert written["CLOUDMAIL_PASSWORD"] == ""
+    assert written["CLOUDMAIL_DOMAIN"] == ""
+
+
 def test_put_runtime_config_allows_partial_runtime_fields_when_api_key_exists(monkeypatch):
     written = {}
 

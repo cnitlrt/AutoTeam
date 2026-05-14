@@ -9,7 +9,7 @@
 | 服务 | 说明 | 获取方式 |
 |------|------|---------|
 | **ChatGPT Team 订阅** | 管理员主号，需要有 Team 订阅 | [chatgpt.com](https://chatgpt.com) |
-| **CloudMail / Cloudflare Temp Email** | 二选一的临时邮箱服务，用于自动注册与收验证码 | 自建 [cloud-mail](https://github.com/maillab/cloud-mail) / [cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email) |
+| **CloudMail / Cloudflare Temp Email** | 可配一个或多个的临时邮箱服务，用于自动注册与收验证码 | 自建 [cloud-mail](https://github.com/maillab/cloud-mail) / [cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email) |
 | **CLIProxyAPI / Sub2API** | 可选的认证同步目标，可启用一个或同时启用 | 自建 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) / [Sub2API](https://github.com/Wei-Shaw/sub2api) |
 | **VPS / 本地机器** | 推荐 Ubuntu 22.04+；也支持 Windows / macOS | 任意云服务商 / 本地电脑 |
 | **域名** | 用于邮箱服务与 Verified Domains | 任意域名注册商 |
@@ -20,7 +20,7 @@
 
 ### 1. 搭建邮箱服务（CloudMail / Cloudflare Temp Email）
 
-二选一即可。
+至少准备一个即可；如果你有多个邮箱后缀或多个后端实例，也可以同时配置多个。
 
 #### 方案 A：CloudMail
 
@@ -129,7 +129,7 @@ uv run autoteam api
 如果你直接在 `.env` / 配置面板里填写运行项，常见组合例如：
 
 ```dotenv
-# 邮箱服务（二选一）
+# 兼容旧版的单邮箱服务写法
 MAIL_PROVIDER=cloudmail
 CLOUDMAIL_BASE_URL=https://your-cloudmail.com/api
 CLOUDMAIL_EMAIL=admin@your-domain.com
@@ -141,6 +141,13 @@ MAIL_PROVIDER=cloudflare_temp_email
 CF_TEMP_EMAIL_BASE_URL=https://temp-email-api.example.com
 CF_TEMP_EMAIL_ADMIN_PASSWORD=your_admin_password
 CF_TEMP_EMAIL_DOMAIN=email.example.com
+```
+
+如果你需要同时维护多个邮箱服务，更推荐直接在 Web 配置面板里“添加/删除邮箱服务”。保存后会自动写入：
+
+```dotenv
+MAIL_SERVICES_JSON=[{"id":"cm-1","type":"cloudmail","name":"CloudMail #1","base_url":"https://mail-a.example.com/api","email":"admin@a.example.com","password":"secret","domain":"a.example.com"},{"id":"cf-1","type":"cloudflare_temp_email","name":"CF Temp","base_url":"https://temp.example.com","admin_password":"secret2","domain":"mail.example.com"}]
+MAIL_SERVICE_DEFAULT=cf-1
 
 # 远端同步（可启用一个或两个）
 SYNC_TARGET_CPA=true

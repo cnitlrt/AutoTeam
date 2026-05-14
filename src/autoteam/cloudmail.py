@@ -28,8 +28,14 @@ _VERIFICATION_CODE_PATTERNS = (
 class CloudMailClient:
     provider_name = "cloudmail"
 
-    def __init__(self):
-        self.base_url = CLOUDMAIL_BASE_URL
+    def __init__(self, service=None):
+        service = dict(service or {})
+        self.service_id = str(service.get("id") or "").strip() or None
+        self.service_name = str(service.get("name") or "").strip()
+        self.base_url = str(service.get("base_url") or CLOUDMAIL_BASE_URL or "").strip()
+        self.login_email = str(service.get("email") or CLOUDMAIL_EMAIL or "").strip()
+        self.login_password = str(service.get("password") or CLOUDMAIL_PASSWORD or "").strip()
+        self.domain = str(service.get("domain") or CLOUDMAIL_DOMAIN or "").strip().lstrip("@")
         self.token = None
         self.session = requests.Session()
 
@@ -56,8 +62,8 @@ class CloudMailClient:
         resp = self._post(
             "/login",
             {
-                "email": CLOUDMAIL_EMAIL,
-                "password": CLOUDMAIL_PASSWORD,
+                "email": self.login_email,
+                "password": self.login_password,
             },
         )
         if resp["code"] != 200:
@@ -70,7 +76,7 @@ class CloudMailClient:
         """创建临时邮箱地址，返回 (accountId, email)"""
         if prefix is None:
             prefix = f"tmp-{uuid.uuid4().hex[:8]}"
-        email = f"{prefix}{CLOUDMAIL_DOMAIN}"
+        email = f"{prefix}@{self.domain}" if self.domain else prefix
 
         resp = self._post("/account/add", {"email": email})
         if resp["code"] != 200:

@@ -26,6 +26,7 @@ from autoteam.codex_auth import (
     quota_result_resets_at,
     save_auth_file,
 )
+from autoteam.mail_provider import infer_mail_provider_from_email, infer_mail_service_from_email
 from autoteam.sync_targets import sync_to_configured_targets as sync_to_cpa
 
 logger = logging.getLogger(__name__)
@@ -236,7 +237,12 @@ class ManualAccountFlow:
         accounts = load_accounts()
         account = find_account(accounts, email)
         if not account:
-            add_account(email, "")
+            add_account(
+                email,
+                "",
+                mail_provider=infer_mail_provider_from_email(email) or None,
+                mail_service_id=infer_mail_service_from_email(email) or None,
+            )
 
         update_fields = {
             "status": account_status,

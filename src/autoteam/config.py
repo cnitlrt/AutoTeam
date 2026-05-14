@@ -61,6 +61,8 @@ CLOUDMAIL_DOMAIN = os.environ.get("CLOUDMAIL_DOMAIN", "")
 
 # 邮箱提供者配置
 MAIL_PROVIDER = os.environ.get("MAIL_PROVIDER", "cloudmail").strip().lower() or "cloudmail"
+MAIL_SERVICES_JSON = os.environ.get("MAIL_SERVICES_JSON", "")
+MAIL_SERVICE_DEFAULT = os.environ.get("MAIL_SERVICE_DEFAULT", "").strip()
 
 # Cloudflare Temp Email 配置
 CF_TEMP_EMAIL_BASE_URL = os.environ.get("CF_TEMP_EMAIL_BASE_URL", "")

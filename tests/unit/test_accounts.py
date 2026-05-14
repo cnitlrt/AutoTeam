@@ -113,3 +113,24 @@ def test_load_accounts_normalizes_disabled_field(tmp_path, monkeypatch):
 
     assert loaded[0]["disabled"] is False
     assert loaded[1]["disabled"] is True
+
+
+def test_add_account_persists_mail_service_id_for_non_cloudmail_provider(tmp_path, monkeypatch):
+    accounts_file = tmp_path / "accounts.json"
+    monkeypatch.setattr(accounts, "ACCOUNTS_FILE", accounts_file)
+    monkeypatch.setattr(accounts, "get_admin_email", lambda: "")
+
+    accounts.add_account(
+        "user@example.com",
+        "secret",
+        mail_provider="cloudflare_temp_email",
+        mail_account_id=321,
+        mail_service_id="cf-1",
+    )
+
+    created = accounts.load_accounts()
+
+    assert created[0]["mail_provider"] == "cloudflare_temp_email"
+    assert created[0]["mail_service_id"] == "cf-1"
+    assert created[0]["mail_account_id"] == 321
+    assert created[0]["cloudmail_account_id"] is None

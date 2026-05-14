@@ -50,10 +50,15 @@ def normalize_cloudflare_temp_email_base_url(base_url: str) -> str:
 class CloudflareTempEmailClient:
     provider_name = MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL
 
-    def __init__(self):
-        self.base_url = normalize_cloudflare_temp_email_base_url(CF_TEMP_EMAIL_BASE_URL)
-        self.admin_password = str(CF_TEMP_EMAIL_ADMIN_PASSWORD or "").strip()
-        self.domain = str(CF_TEMP_EMAIL_DOMAIN or "").strip().lstrip("@")
+    def __init__(self, service=None):
+        service = dict(service or {})
+        self.service_id = str(service.get("id") or "").strip() or None
+        self.service_name = str(service.get("name") or "").strip()
+        self.base_url = normalize_cloudflare_temp_email_base_url(
+            str(service.get("base_url") or CF_TEMP_EMAIL_BASE_URL or "")
+        )
+        self.admin_password = str(service.get("admin_password") or CF_TEMP_EMAIL_ADMIN_PASSWORD or "").strip()
+        self.domain = str(service.get("domain") or CF_TEMP_EMAIL_DOMAIN or "").strip().lstrip("@")
         self.session = requests.Session()
 
     def _headers(self):
