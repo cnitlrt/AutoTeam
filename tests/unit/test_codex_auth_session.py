@@ -134,6 +134,121 @@ def test_workspace_selection_detection_ignores_otp_pages():
     assert codex_auth._select_team_workspace(page, "Idapro") is False
 
 
+class _FakeOtpInput:
+    def __init__(self, *, visible=True):
+        self.visible = visible
+        self.filled_values = []
+        self.clicked = False
+
+    def is_visible(self, timeout=0):
+        return self.visible
+
+    def fill(self, value):
+        self.filled_values.append(value)
+
+    def click(self, timeout=0, force=False):
+        self.clicked = True
+
+    def type(self, value, delay=0):
+        self.filled_values.append(value)
+
+
+class _FakeOtpCollection:
+    def __init__(self, items=None, text=None):
+        self._items = list(items or [])
+        self._text = text
+
+    @property
+    def first(self):
+        if self._items:
+            return self._items[0]
+        return _FakeOtpInput(visible=False)
+
+    def all(self):
+        return list(self._items)
+
+    def inner_text(self, timeout=0):
+        if self._text is None:
+            raise AssertionError("unexpected inner_text call")
+        return self._text
+
+
+class _FakeKeyboard:
+    def __init__(self):
+        self.typed = []
+
+    def type(self, value, delay=0):
+        self.typed.append(value)
+
+
+class _FakeOtpPage:
+    def __init__(self, *, url="https://auth.openai.com/email-verification", body="", slot_inputs=None, otp_input=None):
+        self.url = url
+        self._body = body
+        self._slot_inputs = list(slot_inputs or [])
+        self._otp_input = otp_input or _FakeOtpInput(visible=False)
+        self.submit_button = _FakeOtpInput(visible=True)
+        self.keyboard = _FakeKeyboard()
+
+    def locator(self, selector):
+        if selector == "body":
+            return _FakeOtpCollection(text=self._body)
+        if selector == codex_auth._OTP_SINGLE_INPUT_SELECTORS:
+            return _FakeOtpCollection(items=self._slot_inputs)
+        if selector == codex_auth._OTP_INPUT_SELECTORS:
+            return _FakeOtpCollection(items=[self._otp_input])
+        if selector in {
+            'button[type="submit"]',
+            'button:has-text("Continue")',
+            'button:has-text("继续")',
+            'button:has-text("Verify")',
+        }:
+            return _FakeOtpCollection(items=[self.submit_button])
+        return _FakeOtpCollection(items=[])
+
+
+def test_fill_otp_code_uses_single_char_inputs():
+    slots = [_FakeOtpInput() for _ in range(6)]
+    page = _FakeOtpPage(slot_inputs=slots)
+
+    assert codex_auth._fill_otp_code(page, "481556") is True
+
+    assert [slot.filled_values[-1] for slot in slots] == list("481556")
+
+
+def test_wait_for_otp_submit_result_accepts_when_url_leaves_email_verification():
+    page = _FakeOtpPage(url="https://auth.openai.com/workspace", otp_input=_FakeOtpInput(visible=True))
+
+    status, detail = codex_auth._wait_for_otp_submit_result(page, timeout=0.1)
+
+    assert status == "accepted"
+    assert detail is None
+
+
+def test_resolve_email_verification_marks_used_email_after_success(monkeypatch):
+    slots = [_FakeOtpInput() for _ in range(6)]
+    page = _FakeOtpPage(slot_inputs=slots)
+    used_email_ids = set()
+
+    monkeypatch.setattr(codex_auth, "_poll_mail_verification_code", lambda *args, **kwargs: ("481556", 1888))
+    monkeypatch.setattr(codex_auth, "_wait_for_otp_submit_result", lambda *args, **kwargs: ("accepted", None))
+    monkeypatch.setattr(codex_auth.time, "sleep", lambda *_args, **_kwargs: None)
+
+    status = codex_auth._resolve_email_verification(
+        page,
+        mail_client=object(),
+        email="user@example.com",
+        after_email_id=1000,
+        used_email_ids=used_email_ids,
+        wait_log="[Codex] test wait emailId > %d",
+    )
+
+    assert status == "accepted"
+    assert used_email_ids == {1888}
+    assert [slot.filled_values[-1] for slot in slots] == list("481556")
+    assert page.submit_button.clicked is True
+
+
 def test_workspace_label_candidates_ignore_action_buttons():
     items = [
         _FakeElement("Cancel"),

@@ -222,6 +222,7 @@ _OTP_INPUT_SELECTORS = (
     'input[name="code"], input[inputmode="numeric"], input[autocomplete="one-time-code"], '
     'input[placeholder*="验证码"], input[placeholder*="code" i]'
 )
+_OTP_SINGLE_INPUT_SELECTORS = 'input[maxlength="1"], input[data-input-otp], input[aria-label*="digit" i]'
 _OTP_INVALID_HINTS = (
     "invalid code",
     "incorrect code",
@@ -303,6 +304,9 @@ def _wait_for_otp_submit_result(page, timeout=12):
     deadline = time.time() + timeout
 
     while time.time() < deadline:
+        current_url = (getattr(page, "url", "") or "").lower()
+        if current_url and "email-verification" not in current_url:
+            return "accepted", None
         err = _detect_otp_error(page)
         if err:
             return "invalid", err
@@ -314,6 +318,201 @@ def _wait_for_otp_submit_result(page, timeout=12):
     if err:
         return "invalid", err
     return "pending", None
+
+
+def _visible_otp_slot_inputs(page, timeout=300):
+    try:
+        candidates = page.locator(_OTP_SINGLE_INPUT_SELECTORS).all()
+    except Exception:
+        return []
+
+    visible = []
+    for loc in candidates:
+        try:
+            if loc.is_visible(timeout=timeout):
+                visible.append(loc)
+        except Exception:
+            continue
+    return visible
+
+
+def _fill_otp_code(page, code: str) -> bool:
+    value = str(code or "").strip()
+    if not value:
+        return False
+
+    slot_inputs = _visible_otp_slot_inputs(page, timeout=200)
+    if len(slot_inputs) >= min(4, len(value)):
+        logger.info("[Codex] 检测到 %d 个单字符验证码输入框", len(slot_inputs))
+        for index, char in enumerate(value):
+            if index >= len(slot_inputs):
+                break
+            loc = slot_inputs[index]
+            try:
+                loc.click(force=True)
+            except Exception:
+                pass
+            try:
+                loc.fill("")
+            except Exception:
+                pass
+            try:
+                loc.fill(char)
+            except Exception:
+                try:
+                    loc.type(char, delay=50)
+                except Exception:
+                    try:
+                        page.keyboard.type(char, delay=50)
+                    except Exception:
+                        return False
+            time.sleep(0.1)
+        return True
+
+    try:
+        otp_input = page.locator(_OTP_INPUT_SELECTORS).first
+        if otp_input.is_visible(timeout=2000):
+            otp_input.fill(value)
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _click_otp_submit_button(page) -> bool:
+    for selector in (
+        'button[type="submit"]',
+        'button:has-text("Continue")',
+        'button:has-text("继续")',
+        'button:has-text("Verify")',
+    ):
+        try:
+            button = page.locator(selector).first
+            if button.is_visible(timeout=800):
+                button.click()
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _poll_mail_verification_code(
+    mail_client,
+    email: str,
+    *,
+    after_email_id: int,
+    used_email_ids: set[int],
+    timeout: int = 120,
+    require_sender: bool = False,
+):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for em in mail_client.search_emails_by_recipient(email, size=5):
+            email_id = em.get("emailId", 0)
+            if email_id <= after_email_id or email_id in used_email_ids:
+                continue
+
+            if require_sender:
+                sender = (em.get("sendEmail") or "").lower()
+                if "openai" not in sender and "chatgpt" not in sender:
+                    continue
+
+            subject = (em.get("subject") or "").lower()
+            if "invited" in subject or "invitation" in subject:
+                continue
+
+            code = mail_client.extract_verification_code(em)
+            if code:
+                return code, email_id
+        time.sleep(3)
+
+    return None, 0
+
+
+def _resolve_email_verification(
+    page,
+    *,
+    mail_client,
+    email: str,
+    after_email_id: int,
+    used_email_ids: set[int],
+    wait_log: str,
+    require_sender: bool = False,
+    wait_timeout: int = 120,
+    submit_timeout: int = 15,
+) -> str:
+    logger.info(wait_log, after_email_id)
+
+    otp, otp_email_id = _poll_mail_verification_code(
+        mail_client,
+        email,
+        after_email_id=after_email_id,
+        used_email_ids=used_email_ids,
+        timeout=wait_timeout,
+        require_sender=require_sender,
+    )
+    if not otp:
+        logger.warning("[Codex] 未获取到验证码")
+        return "no_code"
+
+    logger.info("[Codex] 获取到验证码: %s", otp)
+
+    for submit_attempt in range(1, 3):
+        current_url = (getattr(page, "url", "") or "").lower()
+        if current_url and "email-verification" not in current_url:
+            used_email_ids.add(otp_email_id)
+            return "accepted"
+
+        if not _fill_otp_code(page, otp):
+            if current_url and "email-verification" not in current_url:
+                used_email_ids.add(otp_email_id)
+                return "accepted"
+            if submit_attempt < 2:
+                logger.warning("[Codex] 验证码输入框不可用，准备重试第 %d/2 次", submit_attempt + 1)
+                time.sleep(2)
+                continue
+            used_email_ids.add(otp_email_id)
+            logger.warning("[Codex] 验证码输入框不可用，标记并跳过邮件 %s", otp_email_id)
+            return "input_unavailable"
+
+        time.sleep(0.5)
+        _click_otp_submit_button(page)
+        logger.info("[Codex] 已输入验证码: %s", otp)
+
+        submit_status, submit_detail = _wait_for_otp_submit_result(page, timeout=submit_timeout)
+        if submit_status == "accepted":
+            used_email_ids.add(otp_email_id)
+            return "accepted"
+        if submit_status == "invalid":
+            used_email_ids.add(otp_email_id)
+            detail_suffix = f"，命中提示: {submit_detail}" if submit_detail else ""
+            logger.warning(
+                "[Codex] 验证码邮件 %s（code=%s）被页面判定无效%s，标记并跳过该邮件",
+                otp_email_id,
+                otp,
+                detail_suffix,
+            )
+            return "invalid"
+
+        if submit_attempt < 2:
+            logger.warning(
+                "[Codex] 验证码邮件 %s（code=%s）提交后未确认成功，准备重试第 %d/2 次",
+                otp_email_id,
+                otp,
+                submit_attempt + 1,
+            )
+            time.sleep(2)
+        else:
+            used_email_ids.add(otp_email_id)
+            logger.warning(
+                "[Codex] 验证码邮件 %s（code=%s）提交后仍未确认成功，标记并跳过该邮件",
+                otp_email_id,
+                otp,
+            )
+            return "pending"
+
+    return "pending"
 
 
 def _complete_oauth_about_you(page, signup_profile: SignupProfile | None = None) -> bool:
@@ -587,30 +786,15 @@ def login_codex_via_browser(
 
         # 可能需要邮箱验证码
         try:
-            ci = _page.locator('input[name="code"]').first
-            if ci.is_visible(timeout=5000) and mail_client:
-                logger.info("[Codex] ChatGPT 登录需要验证码，等待 emailId > %d 的新邮件...", _email_id_before_login)
-                otp = None
-                otp_email_id = 0
-                t0 = time.time()
-                while time.time() - t0 < 120:
-                    for em in mail_client.search_emails_by_recipient(email, size=5):
-                        email_id = em.get("emailId", 0)
-                        if email_id <= _email_id_before_login or email_id in _used_email_ids:
-                            continue
-                        otp = mail_client.extract_verification_code(em)
-                        if otp:
-                            otp_email_id = email_id
-                            break
-                    if otp:
-                        break
-                    time.sleep(3)
-                if otp:
-                    _used_email_ids.add(otp_email_id)
-                    ci.fill(otp)
-                    time.sleep(0.5)
-                    _page.locator('button[type="submit"]').first.click()
-                    time.sleep(5)
+            if mail_client and _is_otp_input_visible(_page, timeout=5000):
+                _resolve_email_verification(
+                    _page,
+                    mail_client=mail_client,
+                    email=email,
+                    after_email_id=_email_id_before_login,
+                    used_email_ids=_used_email_ids,
+                    wait_log="[Codex] ChatGPT 登录需要验证码，等待 emailId > %d 的新邮件...",
+                )
         except Exception:
             pass
 
@@ -711,52 +895,19 @@ def login_codex_via_browser(
 
         # 可能需要邮箱登录验证码
         _screenshot(page, "codex_03b_check_otp.png")
-        code_input = None
-        try:
-            code_input = page.locator(
-                'input[name="code"], input[placeholder*="验证码"], input[placeholder*="code" i]'
-            ).first
-            if not code_input.is_visible(timeout=5000):
-                code_input = None
-        except Exception:
-            code_input = None
+        code_input_visible = _is_otp_input_visible(page, timeout=5000)
 
-        if code_input and mail_client:
-            logger.info("[Codex] 需要登录验证码，等待 emailId > %d 的新邮件...", _email_id_before_login)
-
-            start_t = time.time()
-            otp_code = None
-            otp_email_id = 0
-            while time.time() - start_t < 120:
-                emails = mail_client.search_emails_by_recipient(email, size=5)
-                for em in emails:
-                    email_id = em.get("emailId", 0)
-                    if email_id <= _email_id_before_login or email_id in _used_email_ids:
-                        continue
-                    subj = em.get("subject", "").lower()
-                    if "invited" in subj or "invitation" in subj:
-                        continue
-                    otp_code = mail_client.extract_verification_code(em)
-                    if otp_code:
-                        otp_email_id = email_id
-                        break
-                if otp_code:
-                    break
-                time.sleep(3)
-
-            if otp_code:
-                _used_email_ids.add(otp_email_id)
-                logger.info("[Codex] 获取到验证码: %s", otp_code)
-                code_input.fill(otp_code)
-                time.sleep(0.5)
-                page.locator(
-                    'button:has-text("Continue"), button:has-text("继续"), button[type="submit"]'
-                ).first.click()
-                time.sleep(5)
-                _screenshot(page, "codex_03c_after_otp.png")
-            else:
-                logger.warning("[Codex] 未获取到验证码")
-        elif code_input:
+        if code_input_visible and mail_client:
+            _resolve_email_verification(
+                page,
+                mail_client=mail_client,
+                email=email,
+                after_email_id=_email_id_before_login,
+                used_email_ids=_used_email_ids,
+                wait_log="[Codex] 需要登录验证码，等待 emailId > %d 的新邮件...",
+            )
+            _screenshot(page, "codex_03c_after_otp.png")
+        elif code_input_visible:
             logger.warning("[Codex] 需要验证码但无 mail_client，无法自动获取")
 
         if "about-you" in page.url:
@@ -841,90 +992,18 @@ def login_codex_via_browser(
 
             # 处理邮箱验证码页面（可能在 consent 流程中出现）
             try:
-                otp_input = page.locator(_OTP_INPUT_SELECTORS).first
-                if otp_input.is_visible(timeout=2000) and mail_client:
-                    logger.info(
-                        "[Codex] 需要邮箱验证码 (step %d)，等待 emailId > %d 的新邮件...",
-                        step + 1,
-                        _email_id_before_login,
+                if _is_otp_input_visible(page, timeout=2000) and mail_client:
+                    submit_status = _resolve_email_verification(
+                        page,
+                        mail_client=mail_client,
+                        email=email,
+                        after_email_id=_email_id_before_login,
+                        used_email_ids=_used_email_ids,
+                        wait_log=f"[Codex] 需要邮箱验证码 (step {step + 1})，等待 emailId > %d 的新邮件...",
+                        require_sender=True,
                     )
-                    otp = None
-                    otp_email_id = 0
-                    page_left_code = False
-                    t0 = time.time()
-                    while time.time() - t0 < 120:
-                        if not _is_otp_input_visible(page, timeout=300):
-                            page_left_code = True
-                            logger.info("[Codex] 验证码页已退出，继续后续授权流程")
-                            break
-                        for em in mail_client.search_emails_by_recipient(email, size=5):
-                            # 只接受比快照更新的邮件
-                            email_id = em.get("emailId", 0)
-                            if email_id <= _email_id_before_login or email_id in _used_email_ids:
-                                continue
-                            sender = (em.get("sendEmail") or "").lower()
-                            if "openai" not in sender and "chatgpt" not in sender:
-                                continue
-                            subj = (em.get("subject") or "").lower()
-                            if "invited" in subj or "invitation" in subj:
-                                continue
-                            otp = mail_client.extract_verification_code(em)
-                            if otp:
-                                otp_email_id = email_id
-                                break
-                        if otp:
-                            break
-                        time.sleep(3)
-                    if otp:
-                        submit_ok = False
-                        for submit_attempt in range(1, 3):
-                            otp_input = page.locator(_OTP_INPUT_SELECTORS).first
-                            if not otp_input.is_visible(timeout=2000):
-                                submit_ok = True
-                                break
-
-                            otp_input.fill(otp)
-                            time.sleep(0.5)
-                            page.locator(
-                                'button[type="submit"], button:has-text("Continue"), button:has-text("继续")'
-                            ).first.click()
-                            logger.info("[Codex] 已输入验证码: %s", otp)
-
-                            submit_status, submit_detail = _wait_for_otp_submit_result(page, timeout=12)
-                            if submit_status == "accepted":
-                                submit_ok = True
-                                break
-                            if submit_status == "invalid":
-                                _used_email_ids.add(otp_email_id)
-                                detail_suffix = f"，命中提示: {submit_detail}" if submit_detail else ""
-                                logger.warning(
-                                    "[Codex] 验证码邮件 %s（code=%s）被页面判定无效%s，标记并跳过该邮件",
-                                    otp_email_id,
-                                    otp,
-                                    detail_suffix,
-                                )
-                                break
-
-                            if submit_attempt < 2:
-                                logger.warning(
-                                    "[Codex] 验证码邮件 %s（code=%s）提交后未确认成功，准备重试第 %d/2 次",
-                                    otp_email_id,
-                                    otp,
-                                    submit_attempt + 1,
-                                )
-                                time.sleep(2)
-                            else:
-                                _used_email_ids.add(otp_email_id)
-                                logger.warning(
-                                    "[Codex] 验证码邮件 %s（code=%s）提交后仍未确认成功，标记并跳过该邮件",
-                                    otp_email_id,
-                                    otp,
-                                )
-
-                        if submit_ok:
-                            _used_email_ids.add(otp_email_id)
-                        continue
-                    if page_left_code:
+                    if submit_status == "accepted":
+                        logger.info("[Codex] 验证码页已退出，继续后续授权流程")
                         continue
             except Exception:
                 pass
