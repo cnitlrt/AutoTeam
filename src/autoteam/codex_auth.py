@@ -78,6 +78,8 @@ def _classify_oauth_failure(url, body_excerpt=""):
 
     if "add-phone" in url:
         return "add_phone", "需要手机号验证", False
+    if "choose-an-account" in url:
+        return "choose_account_selection", "卡在账号选择页", True
     if "verify you are human" in body or "captcha" in body:
         return "human_verification", "命中人机验证", False
     if "unable to load site" in body or "try again later" in body or "status page" in body:
@@ -272,6 +274,33 @@ _WORKSPACE_IGNORE_SUBSTRINGS = (
     "email code",
     "continue with password",
     "use password",
+)
+_CHOOSE_ACCOUNT_PAGE_HINTS = (
+    "choose an account",
+    "select an account",
+    "continue as",
+    "choose a chatgpt account",
+    "选择一个账号",
+    "选择账号",
+)
+_CHOOSE_ACCOUNT_IGNORE_LABELS = {
+    "choose an account",
+    "select an account",
+    "choose a chatgpt account",
+    "continue as",
+    "continue",
+    "继续",
+    "allow",
+    "log in",
+    "cancel",
+    "back",
+    "terms of use",
+    "privacy policy",
+}
+_CHOOSE_ACCOUNT_IGNORE_SUBSTRINGS = (
+    "terms of use",
+    "privacy policy",
+    "continue with",
 )
 
 
@@ -583,6 +612,19 @@ def _is_workspace_selection_page(page) -> bool:
     return hint_hits >= 2 or "launch a workspace" in body
 
 
+def _is_choose_account_page(page) -> bool:
+    url = (page.url or "").lower()
+    if "choose-an-account" in url:
+        return True
+
+    try:
+        body = page.locator("body").inner_text(timeout=1200).lower()
+    except Exception:
+        body = ""
+
+    return any(hint in body for hint in _CHOOSE_ACCOUNT_PAGE_HINTS)
+
+
 def _workspace_label_candidates(page):
     if not _is_workspace_selection_page(page):
         return []
@@ -612,6 +654,50 @@ def _workspace_label_candidates(page):
                     continue
                 lowered = text.lower()
                 if not text or lowered in seen or len(text) > 80 or _is_workspace_ignored_label(lowered):
+                    continue
+                seen.add(lowered)
+                candidates.append((text, loc))
+        except Exception:
+            continue
+    return candidates
+
+
+def _is_choose_account_ignored_label(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if lowered in _CHOOSE_ACCOUNT_IGNORE_LABELS:
+        return True
+    return any(token in lowered for token in _CHOOSE_ACCOUNT_IGNORE_SUBSTRINGS)
+
+
+def _choose_account_label_candidates(page):
+    if not _is_choose_account_page(page):
+        return []
+
+    selectors = (
+        "button",
+        "a",
+        '[role="button"]',
+        '[role="option"]',
+        '[aria-selected="true"]',
+        '[aria-selected="false"]',
+        "[data-state]",
+        "li",
+        "label",
+        "div",
+    )
+    seen = set()
+    candidates = []
+    for selector in selectors:
+        try:
+            for loc in page.locator(selector).all():
+                try:
+                    if not loc.is_visible(timeout=100):
+                        continue
+                    text = re.sub(r"\s+", " ", loc.inner_text(timeout=200)).strip()
+                except Exception:
+                    continue
+                lowered = text.lower()
+                if not text or lowered in seen or len(text) > 160 or _is_choose_account_ignored_label(lowered):
                     continue
                 seen.add(lowered)
                 candidates.append((text, loc))
@@ -660,6 +746,50 @@ def _select_team_workspace(page, workspace_name: str) -> bool:
                 continue
             logger.info("[Codex] 选择 Team workspace: %s", preferred_name)
             time.sleep(3)
+            return True
+        except Exception:
+            continue
+
+    return False
+
+
+def _select_oauth_account(page, email: str) -> bool:
+    preferred_email = str(email or "").strip().lower()
+    if not preferred_email:
+        return False
+
+    for text, loc in _choose_account_label_candidates(page):
+        lowered = text.strip().lower()
+        if preferred_email not in lowered:
+            continue
+        if not _click_workspace_locator(loc):
+            continue
+        logger.info("[Codex] 选择 OAuth 账号: %s", text)
+        time.sleep(2)
+        try:
+            confirm = page.locator(
+                'button:has-text("Continue"), button:has-text("继续"), button:has-text("Allow")'
+            ).first
+            if confirm.is_visible(timeout=800):
+                confirm.click()
+                logger.info("[Codex] 已确认 OAuth 账号选择")
+                time.sleep(3)
+        except Exception:
+            pass
+        return True
+
+    for selector in (
+        f'text="{email}"',
+        f"text=/{re.escape(email)}/i",
+    ):
+        try:
+            loc = page.locator(selector).first
+            if not loc.is_visible(timeout=500):
+                continue
+            if not _click_workspace_locator(loc):
+                continue
+            logger.info("[Codex] 选择 OAuth 账号: %s", email)
+            time.sleep(2)
             return True
         except Exception:
             continue
@@ -919,6 +1049,19 @@ def login_codex_via_browser(
                 break
 
             _screenshot(page, f"codex_04_step{step + 1}_before.png")
+
+            try:
+                if _is_choose_account_page(page):
+                    _screenshot(page, f"codex_04_choose_account_{step + 1}_before.png")
+                    logger.info("[Codex] 检测到账号选择页 (step %d)，尝试选择: %s", step + 1, email)
+                    selected = _select_oauth_account(page, email)
+                    _screenshot(page, f"codex_04_choose_account_{step + 1}_after.png")
+                    if selected and not _is_choose_account_page(page):
+                        continue
+                    if not selected:
+                        logger.warning("[Codex] 无法自动选择 OAuth 账号: %s (step %d)", email, step + 1)
+            except Exception:
+                pass
 
             # 在任何页面中，如果有 workspace/组织选择，先选 Team
             try:

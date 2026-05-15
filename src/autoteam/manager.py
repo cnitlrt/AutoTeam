@@ -301,6 +301,7 @@ def _auth_repair_add_phone_retry_delays(max_retries: int | None = None) -> tuple
 def _auth_repair_error_label(error_type: str | None) -> str:
     mapping = {
         "add_phone": "手机号验证",
+        "choose_account_selection": "账号选择未完成",
         "human_verification": "人机验证",
         "email_verification": "邮箱验证码页卡住",
         "workspace_selection": "workspace 选择未完成",

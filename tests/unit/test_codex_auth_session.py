@@ -84,12 +84,13 @@ def test_refresh_main_auth_file_saves_bundle_from_session_login(monkeypatch):
 
 
 class _FakeElement:
-    def __init__(self, text):
+    def __init__(self, text, *, visible=True):
         self._text = text
+        self.visible = visible
         self.clicked = False
 
     def is_visible(self, timeout=0):
-        return True
+        return self.visible
 
     def inner_text(self, timeout=0):
         return self._text
@@ -103,6 +104,12 @@ class _FakeCollection:
         self._items = items or []
         self._text = text
 
+    @property
+    def first(self):
+        if self._items:
+            return self._items[0]
+        return _FakeElement("", visible=False)
+
     def all(self):
         return list(self._items)
 
@@ -113,6 +120,19 @@ class _FakeCollection:
 
 
 class _FakePage:
+    _GENERIC_SELECTORS = {
+        "button",
+        "a",
+        '[role="button"]',
+        '[role="option"]',
+        '[aria-selected="true"]',
+        '[aria-selected="false"]',
+        "[data-state]",
+        "li",
+        "label",
+        "div",
+    }
+
     def __init__(self, *, url, body, elements=None):
         self.url = url
         self._body = body
@@ -121,7 +141,26 @@ class _FakePage:
     def locator(self, selector):
         if selector == "body":
             return _FakeCollection(text=self._body)
-        return _FakeCollection(items=self._elements)
+        if selector in self._GENERIC_SELECTORS:
+            return _FakeCollection(items=self._elements)
+        return _FakeCollection(items=[])
+
+
+class _FakeChooseAccountPage(_FakePage):
+    def __init__(self, *, url, body, account_elements=None, continue_button=None):
+        super().__init__(url=url, body=body, elements=account_elements)
+        self._continue_button = continue_button or _FakeElement("Continue", visible=False)
+
+    def locator(self, selector):
+        if selector == "body":
+            return _FakeCollection(text=self._body)
+        if selector in {
+            'button:has-text("Continue"), button:has-text("继续"), button:has-text("Allow")',
+        }:
+            return _FakeCollection(items=[self._continue_button])
+        if selector in self._GENERIC_SELECTORS:
+            return _FakeCollection(items=self._elements)
+        return _FakeCollection(items=[])
 
 
 def test_workspace_selection_detection_ignores_otp_pages():
@@ -132,6 +171,32 @@ def test_workspace_selection_detection_ignores_otp_pages():
 
     assert codex_auth._is_workspace_selection_page(page) is False
     assert codex_auth._select_team_workspace(page, "Idapro") is False
+
+
+def test_classify_oauth_failure_detects_choose_account_page():
+    error_type, detail, retryable = codex_auth._classify_oauth_failure("https://auth.openai.com/choose-an-account")
+
+    assert error_type == "choose_account_selection"
+    assert detail == "卡在账号选择页"
+    assert retryable is True
+
+
+def test_select_oauth_account_clicks_matching_email_and_continue():
+    other = _FakeElement("other@example.com")
+    target = _FakeElement("tmpe7b9cd4b@xxmail.idapro.tech")
+    confirm = _FakeElement("Continue")
+    page = _FakeChooseAccountPage(
+        url="https://auth.openai.com/choose-an-account",
+        body="Choose an account Continue as tmpe7b9cd4b@xxmail.idapro.tech",
+        account_elements=[other, target],
+        continue_button=confirm,
+    )
+
+    assert codex_auth._is_choose_account_page(page) is True
+    assert codex_auth._select_oauth_account(page, "tmpe7b9cd4b@xxmail.idapro.tech") is True
+    assert other.clicked is False
+    assert target.clicked is True
+    assert confirm.clicked is True
 
 
 class _FakeOtpInput:
