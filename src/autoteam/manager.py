@@ -386,13 +386,14 @@ def _record_auth_repair_failure(
     error_detail: str | None = None,
     *,
     chatgpt_api=None,
+    release_team_seat: bool = False,
 ) -> dict:
     now = time.time()
     acc = find_account(load_accounts(), email) or {"email": email}
     error_type = error_type or "login_failed"
     error_detail = error_detail or _auth_repair_error_label(error_type)
     retry_delays = _auth_repair_retry_delays()
-    release_team_seat = False
+    should_release_team_seat = bool(release_team_seat)
 
     if error_type == "add_phone" and _auth_repair_retry_add_phone_enabled():
         prev_count = int(acc.get("auth_retry_count") or 0) if acc.get("auth_last_error") == "add_phone" else 0
@@ -409,7 +410,7 @@ def _record_auth_repair_failure(
                 "auth_retry_after": None,
                 "auth_retry_paused": True,
             }
-            release_team_seat = True
+            should_release_team_seat = True
         else:
             state = {
                 "auth_retry_count": next_count,
@@ -452,7 +453,7 @@ def _record_auth_repair_failure(
     release_attempted = False
     remove_status = None
     seat_released = False
-    if release_team_seat and is_team_member:
+    if should_release_team_seat and is_team_member:
         release_attempted = True
         remove_status = _release_auth_repair_team_seat(email, chatgpt_api=chatgpt_api)
         seat_released = remove_status in ("removed", "already_absent")
@@ -1349,7 +1350,12 @@ def _complete_registration(email, password, invite_link, mail_client):
         logger.info("[注册] 账号就绪: %s", email)
         return email
     else:
-        result = _record_auth_repair_failure(email, login_result.get("error_type"), login_result.get("error_detail"))
+        result = _record_auth_repair_failure(
+            email,
+            login_result.get("error_type"),
+            login_result.get("error_detail"),
+            release_team_seat=True,
+        )
         extra = _auth_repair_result_suffix(result)
         logger.warning(
             "[注册] 账号已加入 Team 但 Codex 登录失败，标记为 %s: %s（%s%s）",
@@ -1358,7 +1364,7 @@ def _complete_registration(email, password, invite_link, mail_client):
             _auth_repair_error_label(result.get("auth_last_error")),
             extra,
         )
-        return email
+        return None
 
 
 def _check_pending_invites(chatgpt_api, mail_client):
@@ -1671,6 +1677,8 @@ def _detect_direct_register_step(page):
     url = (page.url or "").lower()
     if _is_google_redirect(page):
         return "google"
+    if "/api/auth/error" in url or url.endswith("/auth/error"):
+        return "error"
 
     if "email-verification" in url:
         return "code"
@@ -1716,6 +1724,8 @@ def _wait_for_direct_register_step(page, allowed_steps, timeout=15):
     deadline = time.time() + timeout
     while time.time() < deadline:
         step = _detect_direct_register_step(page)
+        if step == "error":
+            return step
         if step in allowed_steps:
             return step
         time.sleep(0.5)
@@ -1981,6 +1991,14 @@ def _register_direct_once(
             logger.warning("[直接注册] 邮箱步骤仍停留在 Google 登录页")
             browser.close()
             return False
+        if current_step == "error":
+            logger.warning("[直接注册] 邮箱步骤进入认证错误页 | URL: %s | body=%s", page.url, _page_excerpt(page))
+            browser.close()
+            return False
+        if current_step == "unknown":
+            logger.warning("[直接注册] 邮箱步骤进入未知状态 | URL: %s | body=%s", page.url, _page_excerpt(page))
+            browser.close()
+            return False
         if current_step == "email":
             logger.warning("[直接注册] 邮箱步骤未推进 | URL: %s | body=%s", page.url, _page_excerpt(page))
             browser.close()
@@ -1994,6 +2012,14 @@ def _register_direct_once(
         )
         logger.info("[直接注册] 密码页检测状态: %s | URL: %s", password_step, page.url)
         _safe_invite_screenshot(page, "direct_03b_before_password.png")
+        if password_step == "error":
+            logger.warning("[直接注册] 密码步骤进入认证错误页 | URL: %s | body=%s", page.url, _page_excerpt(page))
+            browser.close()
+            return False
+        if password_step == "unknown":
+            logger.warning("[直接注册] 无法识别密码/验证码步骤 | URL: %s | body=%s", page.url, _page_excerpt(page))
+            browser.close()
+            return False
 
         try:
             for attempt in range(2):
@@ -2040,6 +2066,14 @@ def _register_direct_once(
         current_step = _detect_direct_register_step(page)
         if current_step == "google":
             logger.warning("[直接注册] 密码步骤仍停留在 Google 登录页")
+            browser.close()
+            return False
+        if current_step == "error":
+            logger.warning("[直接注册] 密码步骤进入认证错误页 | URL: %s | body=%s", page.url, _page_excerpt(page))
+            browser.close()
+            return False
+        if current_step == "unknown":
+            logger.warning("[直接注册] 密码步骤进入未知状态 | URL: %s | body=%s", page.url, _page_excerpt(page))
             browser.close()
             return False
         if current_step == "email":
@@ -2179,7 +2213,12 @@ def create_account_direct(mail_client):
         logger.info("[直接注册] 账号就绪: %s", email)
         return email
     else:
-        result = _record_auth_repair_failure(email, login_result.get("error_type"), login_result.get("error_detail"))
+        result = _record_auth_repair_failure(
+            email,
+            login_result.get("error_type"),
+            login_result.get("error_detail"),
+            release_team_seat=True,
+        )
         extra = _auth_repair_result_suffix(result)
         logger.warning(
             "[直接注册] 账号已加入 Team 但 Codex 登录失败，标记为 %s: %s（%s%s）",
@@ -2188,7 +2227,7 @@ def create_account_direct(mail_client):
             _auth_repair_error_label(result.get("auth_last_error")),
             extra,
         )
-        return email
+        return None
 
 
 def create_new_account(chatgpt_api, mail_client):
@@ -2233,6 +2272,7 @@ def reinvite_account(chatgpt_api, mail_client, acc):
             login_result.get("error_type"),
             login_result.get("error_detail"),
             chatgpt_api=chatgpt_api,
+            release_team_seat=True,
         )
         extra = _auth_repair_result_suffix(result)
         logger.warning(
@@ -2252,6 +2292,7 @@ def reinvite_account(chatgpt_api, mail_client, acc):
             "non_team_plan",
             f"登录后 plan={plan_type or 'unknown'}",
             chatgpt_api=chatgpt_api,
+            release_team_seat=True,
         )
         logger.warning("[轮转] 旧账号保持状态为 %s: %s", result.get("status"), email)
         return False

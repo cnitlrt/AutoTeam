@@ -164,6 +164,45 @@ def test_record_auth_repair_failure_releases_team_seat_after_add_phone_retries_e
     ]
 
 
+def test_record_auth_repair_failure_can_force_release_team_seat_for_rejoin_failures(monkeypatch):
+    updates = []
+    monkeypatch.setattr(
+        manager,
+        "load_accounts",
+        lambda: [{"email": "user@example.com", "status": "standby", "auth_retry_count": 0}],
+    )
+    monkeypatch.setattr(manager, "update_account", lambda email, **kwargs: updates.append((email, kwargs)))
+    monkeypatch.setattr(manager.time, "time", lambda: 1_700_000_000)
+    monkeypatch.setattr(manager, "_auth_repair_retry_delays", lambda: (600, 1200, 1800))
+    monkeypatch.setattr(manager, "_is_email_in_team", lambda _email: True)
+    monkeypatch.setattr(manager, "_release_auth_repair_team_seat", lambda *_args, **_kwargs: "removed")
+
+    state = manager._record_auth_repair_failure(
+        "user@example.com",
+        "auth_code_missing",
+        "未获取到 auth code",
+        release_team_seat=True,
+    )
+
+    assert state["auth_retry_count"] == 1
+    assert state["status"] == "standby"
+    assert state["seat_released"] is True
+    assert updates == [
+        (
+            "user@example.com",
+            {
+                "auth_retry_count": 1,
+                "auth_last_error": "auth_code_missing",
+                "auth_last_error_detail": "未获取到 auth code",
+                "auth_last_failed_at": 1_700_000_000,
+                "auth_retry_after": 1_700_000_600,
+                "auth_retry_paused": False,
+            },
+        ),
+        ("user@example.com", {"status": "standby"}),
+    ]
+
+
 def test_login_codex_with_result_retries_retryable_failures_within_same_round(monkeypatch):
     attempts = {"count": 0}
 

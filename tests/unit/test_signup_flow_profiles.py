@@ -47,8 +47,9 @@ class _FakeElement(_NullElement):
 
 
 class _FakeLocatorGroup:
-    def __init__(self, items=None):
+    def __init__(self, items=None, text=None):
         self._items = list(items or [])
+        self._text = text
 
     @property
     def first(self):
@@ -64,6 +65,11 @@ class _FakeLocatorGroup:
 
     def click(self, timeout=0, force=False):
         return self.first.click(timeout=timeout, force=force)
+
+    def inner_text(self, timeout=0):
+        if self._text is None:
+            raise AssertionError("unexpected inner_text call")
+        return self._text
 
 
 class _FakeKeyboard:
@@ -156,6 +162,38 @@ class _FakePlaywright:
         return False
 
 
+class _DirectFlowPage:
+    def __init__(self):
+        self.url = "https://chatgpt.com/auth/login"
+        self.active_element = None
+        self.keyboard = _FakeKeyboard(self)
+        self.email_input = _FakeElement(self, visible=True, editable=True)
+        self.submit_button = _FakeElement(self, visible=True, editable=False)
+        self._body = "Something went wrong"
+
+    def goto(self, url, wait_until=None, timeout=None):
+        self.url = url
+
+    def content(self):
+        return "<html></html>"
+
+    def locator(self, selector):
+        if selector == "body":
+            return _FakeLocatorGroup(text=self._body)
+        if selector == manager._DIRECT_EMAIL_SELECTORS:
+            return _FakeLocatorGroup([self.email_input])
+        if selector in {
+            manager._DIRECT_PASSWORD_SELECTORS,
+            manager._DIRECT_CODE_SELECTORS,
+            'input[name="name"], [role="spinbutton"]',
+            '[role="spinbutton"]',
+        }:
+            return _FakeLocatorGroup([])
+        if "button" in selector:
+            return _FakeLocatorGroup([self.submit_button])
+        return _FakeLocatorGroup([])
+
+
 def test_fill_about_you_birthday_by_meta_uses_profile_values(monkeypatch):
     monkeypatch.setattr(manager.time, "sleep", lambda *_args, **_kwargs: None)
     profile = SignupProfile("Ethan Carter", 1988, 7, 14, 37)
@@ -185,6 +223,36 @@ def test_complete_direct_about_you_age_branch_uses_profile_values(monkeypatch):
     assert page.name_input.filled == "Noah Bennett"
     assert page.age_input.filled == "33"
     assert page.submit_button.clicked is True
+
+
+def test_detect_direct_register_step_recognizes_auth_error_page():
+    page = _DirectFlowPage()
+    page.url = "https://chatgpt.com/api/auth/error"
+
+    assert manager._detect_direct_register_step(page) == "error"
+
+
+def test_register_direct_once_fails_fast_when_email_step_hits_auth_error(monkeypatch):
+    page = _DirectFlowPage()
+
+    monkeypatch.setattr(manager.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(manager, "_safe_invite_screenshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(manager, "_page_excerpt", lambda *_args, **_kwargs: "Something went wrong")
+    monkeypatch.setattr(
+        manager,
+        "_click_primary_auth_button",
+        lambda page, field, labels: setattr(page, "url", "https://chatgpt.com/api/auth/error") or True,
+    )
+    monkeypatch.setattr(playwright_sync_api, "sync_playwright", lambda: _FakePlaywright(page))
+
+    result = manager._register_direct_once(
+        object(),
+        "user@example.com",
+        "pw",
+        signup_profile=SignupProfile("Liam Parker", 1991, 9, 8, 34),
+    )
+
+    assert result is False
 
 
 def test_create_account_direct_reuses_one_profile_across_retries_and_oauth(monkeypatch):
@@ -227,6 +295,50 @@ def test_create_account_direct_reuses_one_profile_across_retries_and_oauth(monke
     assert login_calls == [profile]
 
 
+def test_create_account_direct_releases_team_seat_and_returns_none_when_oauth_fails(monkeypatch):
+    recorded = {}
+
+    class _FakeMailClient:
+        provider_name = "cloudmail"
+
+        def create_temp_email(self):
+            return 123, "user@example.com"
+
+        def delete_account(self, account_id):
+            raise AssertionError(f"unexpected delete_account({account_id})")
+
+    monkeypatch.setattr(manager.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(manager, "generate_signup_profile", lambda: SignupProfile("Liam Parker", 1991, 9, 8, 34))
+    monkeypatch.setattr(manager, "_register_direct_once", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        manager, "add_account", lambda *args, **kwargs: recorded.setdefault("added", []).append(args[0])
+    )
+    monkeypatch.setattr(
+        manager,
+        "_login_codex_with_result",
+        lambda *args, **kwargs: {
+            "ok": False,
+            "bundle": None,
+            "error_type": "auth_code_missing",
+            "error_detail": "未获取到 auth code",
+        },
+    )
+
+    def fake_record(*args, **kwargs):
+        recorded["record_args"] = args
+        recorded["record_kwargs"] = kwargs
+        return {"status": "standby", "auth_last_error": "auth_code_missing", "seat_released": True}
+
+    monkeypatch.setattr(manager, "_record_auth_repair_failure", fake_record)
+
+    result = manager.create_account_direct(_FakeMailClient())
+
+    assert result is None
+    assert recorded["added"] == ["user@example.com"]
+    assert recorded["record_args"][:3] == ("user@example.com", "auth_code_missing", "未获取到 auth code")
+    assert recorded["record_kwargs"]["release_team_seat"] is True
+
+
 def test_complete_registration_reuses_one_profile_for_invite_and_oauth(monkeypatch):
     profile = SignupProfile("Owen Reed", 1989, 2, 10, 37)
     fake_page = _FakePage(url="https://chatgpt.com")
@@ -259,6 +371,42 @@ def test_complete_registration_reuses_one_profile_for_invite_and_oauth(monkeypat
     assert result == "user@example.com"
     assert captured["invite_profile"] is profile
     assert captured["oauth_profile"] is profile
+
+
+def test_complete_registration_releases_team_seat_and_returns_none_when_oauth_fails(monkeypatch):
+    fake_page = _FakePage(url="https://chatgpt.com")
+    recorded = {}
+
+    monkeypatch.setattr(manager, "generate_signup_profile", lambda: SignupProfile("Owen Reed", 1989, 2, 10, 37))
+    monkeypatch.setattr(
+        invite,
+        "register_with_invite",
+        lambda page, invite_link, email, mail_client, password=None, signup_profile=None: (True, password),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_login_codex_with_result",
+        lambda *args, **kwargs: {
+            "ok": False,
+            "bundle": None,
+            "error_type": "choose_account_selection",
+            "error_detail": "卡在账号选择页",
+        },
+    )
+
+    def fake_record(*args, **kwargs):
+        recorded["record_args"] = args
+        recorded["record_kwargs"] = kwargs
+        return {"status": "standby", "auth_last_error": "choose_account_selection", "seat_released": True}
+
+    monkeypatch.setattr(manager, "_record_auth_repair_failure", fake_record)
+    monkeypatch.setattr(playwright_sync_api, "sync_playwright", lambda: _FakePlaywright(fake_page))
+
+    result = manager._complete_registration("user@example.com", "pw", "https://invite", object())
+
+    assert result is None
+    assert recorded["record_args"][:3] == ("user@example.com", "choose_account_selection", "卡在账号选择页")
+    assert recorded["record_kwargs"]["release_team_seat"] is True
 
 
 def test_complete_invite_about_you_uses_profile_values(monkeypatch):
