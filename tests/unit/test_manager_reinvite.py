@@ -93,3 +93,26 @@ def test_reinvite_account_marks_auth_pending_when_oauth_login_fails_but_team_sea
     )
 
     assert result is False
+
+
+def test_reinvite_account_requests_team_seat_release_when_oauth_fails_after_rejoin(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(manager, "login_codex_via_browser", lambda *args, **kwargs: None)
+
+    def fake_record(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {"status": accounts.STATUS_STANDBY, "auth_last_error": "auth_code_missing", "seat_released": True}
+
+    monkeypatch.setattr(manager, "_record_auth_repair_failure", fake_record)
+
+    result = manager.reinvite_account(
+        types.SimpleNamespace(browser=False),
+        None,
+        {"email": "tmp-user@example.com", "password": ""},
+    )
+
+    assert result is False
+    assert captured["args"][:3] == ("tmp-user@example.com", "login_failed", "登录失败")
+    assert captured["kwargs"]["release_team_seat"] is True
