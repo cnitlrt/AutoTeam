@@ -1528,6 +1528,8 @@ class SessionCodexAuthFlow:
             if step == "password_required":
                 if self._switch_password_to_otp():
                     continue
+                if self._auto_fill_password():
+                    continue
                 return {
                     "step": "unsupported_password",
                     "detail": "主号 Codex 当前停留在密码页，且未找到一次性验证码入口",
@@ -1618,12 +1620,14 @@ class SessionCodexAuthFlow:
 
 class MainCodexLoginFlow(SessionCodexAuthFlow):
     def __init__(self):
+        from autoteam.admin_state import get_admin_password
+
         super().__init__(
             email=get_admin_email(),
             session_token=get_admin_session_token(),
             account_id=get_chatgpt_account_id(),
             workspace_name=get_chatgpt_workspace_name(),
-            password="",
+            password=get_admin_password(),
             password_callback=None,
             auth_file_callback=save_main_auth_file,
         )
