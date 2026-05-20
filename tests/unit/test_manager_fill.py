@@ -1,4 +1,6 @@
-from autoteam import manager
+import pytest
+
+from autoteam import api, manager
 
 
 class _FakeChatGPT:
@@ -181,3 +183,33 @@ def test_auto_reuse_skip_reason_detects_google_provider_and_gmail():
         == "Google 登录账号暂不支持自动复用"
     )
     assert manager._auto_reuse_skip_reason({"email": "user@example.com"}) is None
+
+
+def test_cmd_fill_can_be_cancelled_before_creating_new_account(monkeypatch):
+    chatgpt = _FakeChatGPT()
+    events = []
+    abort_calls = {"count": 0}
+
+    def fake_abort():
+        abort_calls["count"] += 1
+        if abort_calls["count"] >= 3:
+            raise api.TaskCancelledError("任务已终止")
+
+    monkeypatch.setattr(manager, "_abort_if_cancel_requested", fake_abort)
+    monkeypatch.setattr(manager, "ChatGPTTeamAPI", lambda: chatgpt)
+    monkeypatch.setattr(manager, "CloudMailClient", lambda: _FakeMailClient())
+    monkeypatch.setattr(manager, "get_team_member_count", lambda _chatgpt: 4)
+    monkeypatch.setattr(manager, "get_standby_accounts", lambda: [])
+    monkeypatch.setattr(
+        manager,
+        "create_new_account",
+        lambda _chatgpt, _mail: events.append(("create", None)) or True,
+    )
+    monkeypatch.setattr(manager, "sync_to_cpa", lambda: events.append(("sync", None)))
+    monkeypatch.setattr(manager, "cmd_status", lambda: events.append(("status", None)))
+
+    with pytest.raises(api.TaskCancelledError, match="任务已终止"):
+        manager.cmd_fill(target=5)
+
+    assert events == []
+    assert chatgpt.stopped == 1

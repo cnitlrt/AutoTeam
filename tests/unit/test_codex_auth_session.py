@@ -162,6 +162,28 @@ class _FakeChooseAccountPage(_FakePage):
             return _FakeCollection(items=self._elements)
         return _FakeCollection(items=[])
 
+    def wait_for_load_state(self, state="domcontentloaded", timeout=0):
+        return None
+
+
+class _FakeChooseAccountTransitionPage(_FakeChooseAccountPage):
+    def __init__(self, *, email):
+        account = _FakeElement(email)
+        super().__init__(
+            url="https://auth.openai.com/choose-an-account",
+            body=f"Choose an account Continue as {email}",
+            account_elements=[account],
+        )
+        self._target_email = email
+        self._advanced = False
+
+    def advance(self):
+        if self._advanced:
+            return
+        self._advanced = True
+        self.url = "https://auth.openai.com/sign-in-with-chatgpt/codex/consent"
+        self._body = "Codex wants access to your API organization Select a project Continue"
+
 
 def test_workspace_selection_detection_ignores_otp_pages():
     page = _FakePage(
@@ -197,6 +219,21 @@ def test_select_oauth_account_clicks_matching_email_and_continue():
     assert other.clicked is False
     assert target.clicked is True
     assert confirm.clicked is True
+
+
+def test_wait_for_choose_account_exit_waits_until_page_leaves_picker(monkeypatch):
+    page = _FakeChooseAccountTransitionPage(email="tmpe7b9cd4b@xxmail.idapro.tech")
+    clock = {"now": 0.0}
+
+    def fake_sleep(seconds):
+        clock["now"] += seconds
+        page.advance()
+
+    monkeypatch.setattr(codex_auth.time, "sleep", fake_sleep)
+    monkeypatch.setattr(codex_auth.time, "time", lambda: clock["now"])
+
+    assert codex_auth._wait_for_choose_account_exit(page, timeout=2) is True
+    assert page.url == "https://auth.openai.com/sign-in-with-chatgpt/codex/consent"
 
 
 class _FakeOtpInput:

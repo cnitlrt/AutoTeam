@@ -1022,6 +1022,28 @@ _main_codex_step: str | None = None
 _main_codex_action: str | None = None
 _manual_account_flow = None
 MAX_TASK_HISTORY = 50
+_TASK_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+
+
+class TaskCancelledError(RuntimeError):
+    """后台任务被用户请求终止。"""
+
+
+def _get_task_cancel_message(task: dict | None) -> str:
+    if not task:
+        return "任务已终止"
+    return task.get("cancel_message") or "任务已终止"
+
+
+def is_task_cancel_requested(task_id: str | None = None) -> bool:
+    task = _tasks.get(task_id or _current_task_id or "")
+    return bool(task and task.get("cancel_requested"))
+
+
+def ensure_current_task_not_cancelled(task_id: str | None = None):
+    task = _tasks.get(task_id or _current_task_id or "")
+    if task and task.get("cancel_requested"):
+        raise TaskCancelledError(_get_task_cancel_message(task))
 
 
 # ---------------------------------------------------------------------------
@@ -1165,7 +1187,7 @@ def _prune_tasks():
         return
     sorted_ids = sorted(_tasks, key=lambda k: _tasks[k]["created_at"])
     for tid in sorted_ids[: len(_tasks) - MAX_TASK_HISTORY]:
-        if _tasks[tid]["status"] in ("completed", "failed"):
+        if _tasks[tid]["status"] in _TASK_TERMINAL_STATUSES:
             del _tasks[tid]
 
 
@@ -1176,13 +1198,18 @@ def _run_task(task_id: str, func, *args, **kwargs):
 
     _playwright_lock.acquire()
     _current_task_id = task_id
-    task["status"] = "running"
     task["started_at"] = time.time()
+    task["status"] = "cancelling" if task.get("cancel_requested") else "running"
 
     try:
+        ensure_current_task_not_cancelled(task_id)
         result = func(*args, **kwargs)
         task["status"] = "completed"
         task["result"] = result
+    except TaskCancelledError as e:
+        task["status"] = "cancelled"
+        task["error"] = str(e)
+        logger.warning("[API] 任务 %s 已终止: %s", task_id[:8], e)
     except Exception as e:
         task["status"] = "failed"
         task["error"] = str(e)
@@ -1210,6 +1237,9 @@ def _start_task(command: str, func, params: dict, *args, **kwargs) -> dict:
         "finished_at": None,
         "result": None,
         "error": None,
+        "cancel_requested": False,
+        "cancel_requested_at": None,
+        "cancel_message": "任务已终止",
     }
     _tasks[task_id] = task
     _prune_tasks()
@@ -2663,6 +2693,37 @@ def get_task(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     return task
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+def cancel_task(task_id: str):
+    """请求终止后台任务。"""
+    task = _tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    if task["status"] in _TASK_TERMINAL_STATUSES:
+        return {
+            "task_id": task_id,
+            "status": task["status"],
+            "message": "任务已结束，无需终止",
+            "task": task,
+        }
+
+    if not task.get("cancel_requested"):
+        task["cancel_requested"] = True
+        task["cancel_requested_at"] = time.time()
+        if task["status"] in ("pending", "running"):
+            task["status"] = "cancelling"
+        task["error"] = "任务终止中"
+        logger.warning("[API] 已请求终止任务 %s (%s)", task_id[:8], task.get("command", "unknown"))
+
+    return {
+        "task_id": task_id,
+        "status": task["status"],
+        "message": "已发送终止请求，任务会在安全检查点停止",
+        "task": task,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -998,6 +998,63 @@ def test_post_reset_quota_starts_background_task_without_admin_or_pool_config(mo
     assert started == [("reset-quota", "cmd_reset_quota_recovery", {}, (), {})]
 
 
+def test_cancel_task_marks_running_task_as_cancelling(monkeypatch):
+    task = {
+        "task_id": "task-1",
+        "command": "rotate",
+        "params": {},
+        "status": "running",
+        "created_at": time.time(),
+        "started_at": time.time(),
+        "finished_at": None,
+        "result": None,
+        "error": None,
+        "cancel_requested": False,
+        "cancel_requested_at": None,
+        "cancel_message": "任务已终止",
+    }
+
+    monkeypatch.setattr(api, "_tasks", {"task-1": task})
+
+    result = api.cancel_task("task-1")
+
+    assert result["task_id"] == "task-1"
+    assert result["status"] == "cancelling"
+    assert task["status"] == "cancelling"
+    assert task["cancel_requested"] is True
+    assert task["cancel_requested_at"] is not None
+    assert task["error"] == "任务终止中"
+
+
+def test_run_task_marks_cancel_requested_task_as_cancelled(monkeypatch):
+    task = {
+        "task_id": "task-1",
+        "command": "fill",
+        "params": {},
+        "status": "pending",
+        "created_at": time.time(),
+        "started_at": None,
+        "finished_at": None,
+        "result": None,
+        "error": None,
+        "cancel_requested": True,
+        "cancel_requested_at": time.time(),
+        "cancel_message": "任务已终止",
+    }
+
+    monkeypatch.setattr(api, "_tasks", {"task-1": task})
+    monkeypatch.setattr(api, "_playwright_lock", threading.Lock())
+    monkeypatch.setattr(api, "_current_task_id", None)
+
+    api._run_task("task-1", lambda: (_ for _ in ()).throw(AssertionError("should not run")))
+
+    assert task["status"] == "cancelled"
+    assert task["error"] == "任务已终止"
+    assert task["started_at"] is not None
+    assert task["finished_at"] is not None
+    assert api._current_task_id is None
+
+
 @pytest.mark.parametrize(
     ("endpoint", "action_label"),
     [

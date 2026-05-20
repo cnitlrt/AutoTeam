@@ -100,6 +100,15 @@ def _chatgpt_session_ready(chatgpt_api) -> bool:
     return bool(getattr(chatgpt_api, "browser", None))
 
 
+def _abort_if_cancel_requested():
+    try:
+        from autoteam.api import ensure_current_task_not_cancelled
+    except ImportError:
+        return
+
+    ensure_current_task_not_cancelled()
+
+
 AUTH_REPAIR_HARD_FAILURE_TYPES = {"human_verification"}
 AUTH_REPAIR_SINGLE_ATTEMPT_FAILURE_TYPES = {"add_phone", "human_verification"}
 
@@ -890,6 +899,8 @@ def cmd_check(force_auth_repair=False, preserve_low_active=False, preserved_low_
     """检查可用账号额度，并尝试修复 Team 内认证未就绪的账号"""
     from autoteam.config import AUTO_CHECK_THRESHOLD
 
+    _abort_if_cancel_requested()
+
     # API 运行时配置优先（前端可修改）
     try:
         from autoteam.api import _auto_check_config
@@ -914,6 +925,7 @@ def cmd_check(force_auth_repair=False, preserve_low_active=False, preserved_low_
             invite_emails = {(inv.get("email_address") or inv.get("email") or "").lower() for inv in invites}
 
             for acc in pending_accounts:
+                _abort_if_cancel_requested()
                 email = acc["email"]
                 email_l = email.lower()
 
@@ -1008,6 +1020,7 @@ def cmd_check(force_auth_repair=False, preserve_low_active=False, preserved_low_
     if active_with_auth:
         logger.info("[检查] 检查 %d 个 active/auth_pending 账号的额度...", len(active_with_auth))
         for acc in active_with_auth:
+            _abort_if_cancel_requested()
             email = acc["email"]
             was_auth_pending = acc["status"] == STATUS_AUTH_PENDING
             status_str, info = _check_and_refresh(acc)
@@ -1160,6 +1173,7 @@ def cmd_check(force_auth_repair=False, preserve_low_active=False, preserved_low_
         logger.info("[检查] 重新登录 %d 个认证失效/待修复的账号...", len(auth_error_list))
         mail_clients = {}
         for acc in auth_error_list:
+            _abort_if_cancel_requested()
             email = acc["email"]
             password = acc.get("password", "")
             logger.info("[%s] 重新 Codex 登录...", email)
@@ -2315,6 +2329,8 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
     4. 优先从 standby 中选额度已恢复的旧账号填补
     5. 仅当所有旧账号都不可用时，才创建新账号
     """
+    _abort_if_cancel_requested()
+
     TARGET = target_seats
     ACTIVE_TARGET = _pool_active_target(TARGET)
 
@@ -2451,6 +2467,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
         return "ready"
 
     def attempt_seat2_preswitch(low_candidates, current_count):
+        _abort_if_cancel_requested()
         if TARGET != 2 or current_count != TARGET or not low_candidates:
             return {"attempted": False, "current_count": current_count}
 
@@ -2468,6 +2485,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
 
         replacement_email = None
         for acc in standby_list:
+            _abort_if_cancel_requested()
             if evaluate_standby_reuse(acc, "[4/5][预切换]") != "ready":
                 continue
 
@@ -2480,6 +2498,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
                 break
 
         if not replacement_email:
+            _abort_if_cancel_requested()
             logger.info("[5/5] seat=2 预切换：尝试创建新账号...")
             created_email = create_new_account(chatgpt, ensure_mail())
             if created_email and managed_account_ready(created_email):
@@ -2525,6 +2544,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
     sync_account_states()
 
     logger.info("[2/5] 检查额度...")
+    _abort_if_cancel_requested()
     preserved_low_accounts = []
     try:
         cmd_check(
@@ -2539,6 +2559,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
             cmd_check()
 
     try:
+        _abort_if_cancel_requested()
         # 移出所有 exhausted 账号（包括之前已标记的）
         all_accounts = load_accounts()
         all_exhausted = [
@@ -2555,6 +2576,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
         preswitch_result = {"attempted": False}
 
         if TARGET == 2 and all_exhausted:
+            _abort_if_cancel_requested()
             ensure_chatgpt()
             initial_api_count = get_team_member_count(chatgpt)
             preswitch_candidates = list(preserved_low_accounts or [])
@@ -2564,6 +2586,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
                 if _normalized_email(item.get("email"))
             }
             for acc in all_exhausted:
+                _abort_if_cancel_requested()
                 email = _normalized_email(acc.get("email"))
                 if not email or email in seen_preswitch_emails:
                     continue
@@ -2597,6 +2620,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
             if initial_api_count < 0 or not preswitch_attempted:
                 initial_api_count = get_team_member_count(chatgpt)
             for acc in all_exhausted:
+                _abort_if_cancel_requested()
                 email = acc["email"]
                 if not _chatgpt_session_ready(chatgpt):
                     chatgpt.start()
@@ -2644,6 +2668,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
         vacancies = TARGET - current_count
 
         if vacancies <= 0 and TARGET == 2 and current_count == TARGET and preserved_low_accounts:
+            _abort_if_cancel_requested()
             preswitch_result = attempt_seat2_preswitch(preserved_low_accounts, current_count)
             if preswitch_result.get("attempted"):
                 current_count = preswitch_result.get("current_count", current_count)
@@ -2672,6 +2697,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
                 )
                 removed = 0
                 for acc in local_seat_accounts:
+                    _abort_if_cancel_requested()
                     if removed >= excess:
                         break
                     email = acc["email"]
@@ -2715,6 +2741,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
         retry_throttled = []
 
         for acc in standby_list:
+            _abort_if_cancel_requested()
             if filled >= vacancies:
                 break
             email = acc["email"]
@@ -2773,6 +2800,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
             # 必须创建新号
             logger.info("[5/5] 创建 %d 个新账号...", remaining)
             for i in range(remaining):
+                _abort_if_cancel_requested()
                 logger.info("[5/5] 创建第 %d/%d 个...", i + 1, remaining)
                 if not _chatgpt_session_ready(chatgpt):
                     ensure_chatgpt()
@@ -2823,12 +2851,14 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
 
 def cmd_add():
     """手动添加一个新账号"""
+    _abort_if_cancel_requested()
     chatgpt = ChatGPTTeamAPI()
     chatgpt.start()
     mail_client = CloudMailClient()
     mail_client.login()
 
     try:
+        _abort_if_cancel_requested()
         result = create_new_account(chatgpt, mail_client)  # 内部会 stop chatgpt
         if result:
             logger.info("[添加] 新账号添加成功: %s", result)
@@ -3059,6 +3089,7 @@ def get_team_member_count(chatgpt_api):
 
 def cmd_fill(target=5):
     """检测 Team 成员数，不足 target 则自动添加新账号补满"""
+    _abort_if_cancel_requested()
     chatgpt = ChatGPTTeamAPI()
     chatgpt.start()
     mail_client = CloudMailClient()
@@ -3075,6 +3106,7 @@ def cmd_fill(target=5):
         return client
 
     try:
+        _abort_if_cancel_requested()
         current = get_team_member_count(chatgpt)
         if current < 0:
             logger.error("[填充] 获取成员列表失败")
@@ -3096,11 +3128,13 @@ def cmd_fill(target=5):
         standby_index = 0
 
         for i in range(need):
+            _abort_if_cancel_requested()
             logger.info("[填充] 添加第 %d/%d 个账号...", i + 1, need)
 
             # 优先复用 standby 中额度已恢复的旧账号
             added = False
             while standby_index < len(standby_list):
+                _abort_if_cancel_requested()
                 reusable = standby_list[standby_index]
                 standby_index += 1
                 email = reusable["email"]
@@ -3122,6 +3156,7 @@ def cmd_fill(target=5):
                 logger.warning("[填充] 复用旧账号失败，尝试下一个旧账号: %s", email)
 
             if not added:
+                _abort_if_cancel_requested()
                 # 创建新账号
                 logger.info("[填充] 创建新账号...")
                 if not _chatgpt_session_ready(chatgpt):
@@ -3153,6 +3188,7 @@ def cmd_fill(target=5):
 
 def cmd_cleanup(max_seats=None):
     """清理多余的 Team 成员，只移除本地 accounts.json 中管理的账号"""
+    _abort_if_cancel_requested()
     account_id = get_chatgpt_account_id()
     accounts = load_accounts()
     local_emails = {a["email"].lower() for a in accounts if not _is_main_account_email(a.get("email"))}
@@ -3165,6 +3201,7 @@ def cmd_cleanup(max_seats=None):
     chatgpt.start()
 
     try:
+        _abort_if_cancel_requested()
         # 获取当前成员列表
         path = f"/backend-api/accounts/{account_id}/users"
         result = chatgpt._api_fetch("GET", path)
@@ -3183,6 +3220,7 @@ def cmd_cleanup(max_seats=None):
         local_members = []
         external_members = []
         for m in members:
+            _abort_if_cancel_requested()
             email = m.get("email", "").lower()
             if email in local_emails:
                 local_members.append(m)
@@ -3228,6 +3266,7 @@ def cmd_cleanup(max_seats=None):
 
         # 执行移除
         for m in to_remove:
+            _abort_if_cancel_requested()
             email = m.get("email", "")
             user_id = m.get("user_id") or m.get("id")
 
@@ -3248,6 +3287,7 @@ def cmd_cleanup(max_seats=None):
                 inv_data if isinstance(inv_data, list) else inv_data.get("invites", inv_data.get("account_invites", []))
             )
             for inv in invites:
+                _abort_if_cancel_requested()
                 inv_email = inv.get("email_address", "").lower()
                 inv_id = inv.get("id")
                 if inv_email in local_emails and inv_id:
@@ -3264,6 +3304,7 @@ def cmd_cleanup(max_seats=None):
 
 def cmd_reset_quota_recovery():
     """清空所有托管非主号账号的本地额度恢复记录。"""
+    _abort_if_cancel_requested()
     accounts = load_accounts()
     if not accounts:
         summary = {
@@ -3281,6 +3322,7 @@ def cmd_reset_quota_recovery():
     rearmed_to_auth_pending = 0
 
     for acc in accounts:
+        _abort_if_cancel_requested()
         email = acc.get("email", "")
         if _is_main_account_email(email):
             continue

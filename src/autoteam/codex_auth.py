@@ -706,6 +706,29 @@ def _choose_account_label_candidates(page):
     return candidates
 
 
+def _wait_for_choose_account_exit(page, timeout=12) -> bool:
+    deadline = time.time() + timeout
+    last_url = (getattr(page, "url", "") or "").lower()
+
+    while time.time() < deadline:
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=1000)
+        except Exception:
+            pass
+
+        current_url = (getattr(page, "url", "") or "").lower()
+        if f"localhost:{CODEX_CALLBACK_PORT}/auth/callback" in current_url:
+            return True
+        if not _is_choose_account_page(page):
+            return True
+
+        last_url = current_url
+        time.sleep(0.5)
+
+    logger.warning("[Codex] 账号选择后页面仍停留在选择页 | URL=%s", last_url)
+    return False
+
+
 def _click_workspace_locator(loc) -> bool:
     try:
         loc.click(timeout=3000)
@@ -1056,10 +1079,11 @@ def login_codex_via_browser(
                     logger.info("[Codex] 检测到账号选择页 (step %d)，尝试选择: %s", step + 1, email)
                     selected = _select_oauth_account(page, email)
                     _screenshot(page, f"codex_04_choose_account_{step + 1}_after.png")
-                    if selected and not _is_choose_account_page(page):
-                        continue
                     if not selected:
                         logger.warning("[Codex] 无法自动选择 OAuth 账号: %s (step %d)", email, step + 1)
+                    else:
+                        _wait_for_choose_account_exit(page, timeout=12)
+                    continue
             except Exception:
                 pass
 
@@ -1161,9 +1185,11 @@ def login_codex_via_browser(
                     time.sleep(5)
                     _screenshot(page, f"codex_04_consent_{step + 1}.png")
                 else:
-                    break
+                    time.sleep(1)
+                    continue
             except Exception:
-                break
+                time.sleep(1)
+                continue
 
         # 等待 redirect callback 获取 auth code
         for _ in range(30):
