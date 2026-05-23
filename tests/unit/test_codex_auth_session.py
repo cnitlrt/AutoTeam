@@ -84,10 +84,11 @@ def test_refresh_main_auth_file_saves_bundle_from_session_login(monkeypatch):
 
 
 class _FakeElement:
-    def __init__(self, text, *, visible=True):
+    def __init__(self, text, *, visible=True, on_click=None):
         self._text = text
         self.visible = visible
         self.clicked = False
+        self._on_click = on_click
 
     def is_visible(self, timeout=0):
         return self.visible
@@ -97,6 +98,8 @@ class _FakeElement:
 
     def click(self, timeout=0, force=False):
         self.clicked = True
+        if self._on_click:
+            self._on_click()
 
 
 class _FakeCollection:
@@ -183,6 +186,31 @@ class _FakeChooseAccountTransitionPage(_FakeChooseAccountPage):
         self._advanced = True
         self.url = "https://auth.openai.com/sign-in-with-chatgpt/codex/consent"
         self._body = "Codex wants access to your API organization Select a project Continue"
+
+
+class _FakeConsentToAddPhonePage(_FakePage):
+    def __init__(self):
+        self._continue_button = _FakeElement("Continue", on_click=self._advance_to_add_phone)
+        super().__init__(
+            url="https://auth.openai.com/sign-in-with-chatgpt/codex/consent",
+            body="Codex wants access to your API organization Select a project Continue",
+            elements=[],
+        )
+
+    def _advance_to_add_phone(self):
+        self.url = "https://auth.openai.com/add-phone"
+        self._body = "Add a phone number to continue"
+
+    def locator(self, selector):
+        if selector == "body":
+            return _FakeCollection(text=self._body)
+        if selector in {
+            'button:has-text("Continue"), button:has-text("继续"), button:has-text("Allow")',
+        }:
+            return _FakeCollection(items=[self._continue_button])
+        if selector in self._GENERIC_SELECTORS:
+            return _FakeCollection(items=self._elements)
+        return _FakeCollection(items=[])
 
 
 def test_workspace_selection_detection_ignores_otp_pages():
@@ -393,3 +421,41 @@ def test_team_workspace_selection_requires_exact_workspace_name():
 
     assert codex_auth._workspace_label_candidates(page) == [("Personal account", items[1])]
     assert codex_auth._select_team_workspace(page, "Idapro") is False
+
+
+def test_detect_early_oauth_block_detects_add_phone_page():
+    page = _FakePage(url="https://auth.openai.com/add-phone", body="Add a phone number to continue")
+
+    failure = codex_auth._detect_early_oauth_block(page)
+
+    assert failure is not None
+    assert failure["error_type"] == "add_phone"
+    assert failure["error_detail"] == "需要手机号验证"
+    assert failure["retryable"] is False
+
+
+def test_wait_for_oauth_page_progress_detects_add_phone_after_consent_click():
+    page = _FakeConsentToAddPhonePage()
+    consent_btn = page.locator('button:has-text("Continue"), button:has-text("继续"), button:has-text("Allow")').first
+
+    previous_url = page.url
+    consent_btn.click()
+    failure = codex_auth._wait_for_oauth_page_progress(page, previous_url=previous_url, timeout=1)
+
+    assert failure is not None
+    assert failure["error_type"] == "add_phone"
+    assert failure["current_url"] == "https://auth.openai.com/add-phone"
+
+
+def test_session_codex_flow_advance_returns_add_phone_immediately():
+    flow = codex_auth.SessionCodexAuthFlow(
+        email="user@example.com",
+        session_token="session-token",
+        account_id="acc-1",
+        workspace_name="Idapro",
+    )
+    flow.page = _FakePage(url="https://auth.openai.com/add-phone", body="Add a phone number to continue")
+
+    result = flow._advance(attempts=1)
+
+    assert result == {"step": "add_phone", "detail": "需要手机号验证"}
