@@ -35,6 +35,7 @@ CODEX_AUTH_URL = "https://auth.openai.com/oauth/authorize"
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_CALLBACK_PORT = 1455
 CODEX_REDIRECT_URI = f"http://localhost:{CODEX_CALLBACK_PORT}/auth/callback"
+_EARLY_OAUTH_BLOCK_FAILURE_TYPES = {"add_phone", "human_verification", "site_unavailable"}
 
 
 def _generate_pkce():
@@ -91,6 +92,48 @@ def _classify_oauth_failure(url, body_excerpt=""):
     if "/auth/login" in url or "log-in-or-create-account" in url:
         return "login_state_lost", "登录态丢失或回到了登录页", True
     return "auth_code_missing", f"未获取到 auth code（停留在 {url or 'unknown'}）", True
+
+
+def _build_oauth_failure_result(url, body_excerpt=""):
+    error_type, error_detail, retryable = _classify_oauth_failure(url, body_excerpt)
+    return {
+        "ok": False,
+        "bundle": None,
+        "error_type": error_type,
+        "error_detail": error_detail,
+        "retryable": retryable,
+        "current_url": url,
+        "body_excerpt": body_excerpt,
+    }
+
+
+def _detect_early_oauth_block(page):
+    body_excerpt = _page_excerpt(page)
+    failure = _build_oauth_failure_result(getattr(page, "url", ""), body_excerpt)
+    if failure["error_type"] in _EARLY_OAUTH_BLOCK_FAILURE_TYPES:
+        return failure
+    return None
+
+
+def _wait_for_oauth_page_progress(page, previous_url="", timeout=5):
+    previous_url = (previous_url or "").lower()
+    deadline = time.time() + timeout
+
+    while time.time() < deadline:
+        current_url = (getattr(page, "url", "") or "").lower()
+        if f"localhost:{CODEX_CALLBACK_PORT}/auth/callback" in current_url:
+            return None
+
+        failure = _detect_early_oauth_block(page)
+        if failure:
+            return failure
+
+        if previous_url and current_url and current_url != previous_url:
+            return None
+
+        time.sleep(0.5)
+
+    return _detect_early_oauth_block(page)
 
 
 def _build_auth_url(code_challenge, state):
@@ -1071,6 +1114,18 @@ def login_codex_via_browser(
             if auth_code:
                 break
 
+            blocking_failure = _detect_early_oauth_block(page)
+            if blocking_failure:
+                logger.warning(
+                    "[Codex] 提前识别到 OAuth 阻塞页 (step %d): %s | URL=%s",
+                    step + 1,
+                    blocking_failure["error_detail"],
+                    blocking_failure["current_url"],
+                )
+                _screenshot(page, f"codex_04_blocked_{step + 1}.png")
+                failure_result = blocking_failure
+                break
+
             _screenshot(page, f"codex_04_step{step + 1}_before.png")
 
             try:
@@ -1103,11 +1158,24 @@ def login_codex_via_browser(
                         try:
                             cont_btn = page.locator('button:has-text("继续"), button:has-text("Continue")').first
                             if cont_btn.is_visible(timeout=3000):
+                                previous_url = page.url
                                 cont_btn.click()
-                                time.sleep(3)
+                                failure = _wait_for_oauth_page_progress(page, previous_url=previous_url, timeout=3)
+                                if failure:
+                                    logger.warning(
+                                        "[Codex] 提前识别到 OAuth 阻塞页 (step %d): %s | URL=%s",
+                                        step + 1,
+                                        failure["error_detail"],
+                                        failure["current_url"],
+                                    )
+                                    _screenshot(page, f"codex_04_workspace_blocked_{step + 1}.png")
+                                    failure_result = failure
+                                    break
                                 logger.info("[Codex] 已点击继续 (step %d)", step + 1)
                         except Exception:
                             pass
+                        if failure_result:
+                            break
                         continue
                     else:
                         logger.warning("[Codex] 无法选择 workspace '%s' (step %d)", workspace_name, step + 1)
@@ -1181,9 +1249,19 @@ def login_codex_via_browser(
                 ).first
                 if consent_btn.is_visible(timeout=5000):
                     logger.info("[Codex] 点击同意/继续按钮 (step %d)...", step + 1)
+                    previous_url = page.url
                     consent_btn.click()
-                    time.sleep(5)
+                    failure = _wait_for_oauth_page_progress(page, previous_url=previous_url, timeout=5)
                     _screenshot(page, f"codex_04_consent_{step + 1}.png")
+                    if failure:
+                        logger.warning(
+                            "[Codex] 提前识别到 OAuth 阻塞页 (step %d): %s | URL=%s",
+                            step + 1,
+                            failure["error_detail"],
+                            failure["current_url"],
+                        )
+                        failure_result = failure
+                        break
                 else:
                     time.sleep(1)
                     continue
@@ -1213,16 +1291,7 @@ def login_codex_via_browser(
             _screenshot(page, "codex_05_no_callback.png")
             body_excerpt = _page_excerpt(page)
             logger.warning("[Codex] 未获取到 auth code，当前 URL: %s", page.url)
-            error_type, error_detail, retryable = _classify_oauth_failure(page.url, body_excerpt)
-            failure_result = {
-                "ok": False,
-                "bundle": None,
-                "error_type": error_type,
-                "error_detail": error_detail,
-                "retryable": retryable,
-                "current_url": page.url,
-                "body_excerpt": body_excerpt,
-            }
+            failure_result = _build_oauth_failure_result(page.url, body_excerpt)
 
         browser.close()
 
@@ -1392,6 +1461,10 @@ class SessionCodexAuthFlow:
             if self.auth_code:
                 return "completed", None
 
+        blocking_failure = _detect_early_oauth_block(self.page)
+        if blocking_failure:
+            return blocking_failure["error_type"], blocking_failure["error_detail"]
+
         if self._visible_locator(self.CODE_SELECTORS, timeout_ms=800):
             return "code_required", None
         if self._visible_locator(self.PASSWORD_SELECTORS, timeout_ms=800):
@@ -1560,6 +1633,9 @@ class SessionCodexAuthFlow:
                     "step": "unsupported_password",
                     "detail": "主号 Codex 当前停留在密码页，且未找到一次性验证码入口",
                 }
+
+            if step in _EARLY_OAUTH_BLOCK_FAILURE_TYPES:
+                return {"step": step, "detail": detail}
 
             if step == "email_required":
                 if self._auto_fill_email():
