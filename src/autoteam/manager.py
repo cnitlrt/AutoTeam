@@ -2334,14 +2334,18 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
     TARGET = target_seats
     ACTIVE_TARGET = _pool_active_target(TARGET)
 
-    from autoteam.config import AUTO_CHECK_THRESHOLD
+    from autoteam.config import AUTO_CHECK_SKIP_STANDBY_REUSE, AUTO_CHECK_THRESHOLD
 
     try:
         from autoteam.api import _auto_check_config
 
         threshold = _auto_check_config.get("threshold", AUTO_CHECK_THRESHOLD)
+        skip_standby_reuse = bool(
+            _auto_check_config.get("skip_standby_reuse", AUTO_CHECK_SKIP_STANDBY_REUSE)
+        )
     except ImportError:
         threshold = AUTO_CHECK_THRESHOLD
+        skip_standby_reuse = AUTO_CHECK_SKIP_STANDBY_REUSE
 
     chatgpt = None
     mail_client = None
@@ -2475,13 +2479,17 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
         old_email = candidate["email"]
         logger.info("[4/5] seat=2 且检测到需要切换的子号，尝试先预切换再移除旧号: %s", old_email)
 
-        standby_list = [
-            a
-            for a in get_standby_accounts()
-            if not _is_main_account_email(a.get("email"))
-            and not is_account_disabled(a)
-            and _normalized_email(a.get("email")) != _normalized_email(old_email)
-        ]
+        if skip_standby_reuse:
+            standby_list = []
+            logger.info("[4/5] seat=2 预切换：已开启“跳过复用旧账号”，直接创建新账号")
+        else:
+            standby_list = [
+                a
+                for a in get_standby_accounts()
+                if not _is_main_account_email(a.get("email"))
+                and not is_account_disabled(a)
+                and _normalized_email(a.get("email")) != _normalized_email(old_email)
+            ]
 
         replacement_email = None
         for acc in standby_list:
@@ -2731,11 +2739,15 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
 
         # 优先复用旧账号（先验证额度是否真的恢复了）
         filled = 0
-        standby_list = [
-            a
-            for a in get_standby_accounts()
-            if not _is_main_account_email(a.get("email")) and not is_account_disabled(a)
-        ]
+        if skip_standby_reuse:
+            standby_list = []
+            logger.info("[4/5] 已开启“跳过复用旧账号”，跳过 standby 复用阶段，直接进入新账号注册")
+        else:
+            standby_list = [
+                a
+                for a in get_standby_accounts()
+                if not _is_main_account_email(a.get("email")) and not is_account_disabled(a)
+            ]
         quota_skipped = []
         auto_reuse_skipped = []
         retry_throttled = []

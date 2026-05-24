@@ -180,6 +180,7 @@ _ALL_RUNTIME_ENV_KEYS = [
     "AUTO_CHECK_MIN_LOW",
     "AUTO_CHECK_RETRY_ADD_PHONE",
     "AUTO_CHECK_ADD_PHONE_MAX_RETRIES",
+    "AUTO_CHECK_SKIP_STANDBY_REUSE",
     "PLAYWRIGHT_PROXY_URL",
     "PLAYWRIGHT_PROXY_SERVER",
     "PLAYWRIGHT_PROXY_USERNAME",
@@ -668,6 +669,7 @@ def _sync_runtime_globals():
             AUTO_CHECK_INTERVAL,
             AUTO_CHECK_MIN_LOW,
             AUTO_CHECK_RETRY_ADD_PHONE,
+            AUTO_CHECK_SKIP_STANDBY_REUSE,
             AUTO_CHECK_TARGET_SEATS,
             AUTO_CHECK_THRESHOLD,
         )
@@ -678,6 +680,7 @@ def _sync_runtime_globals():
         auto_check_config["min_low"] = AUTO_CHECK_MIN_LOW
         auto_check_config["retry_add_phone"] = AUTO_CHECK_RETRY_ADD_PHONE
         auto_check_config["add_phone_max_retries"] = AUTO_CHECK_ADD_PHONE_MAX_RETRIES
+        auto_check_config["skip_standby_reuse"] = AUTO_CHECK_SKIP_STANDBY_REUSE
         if auto_check_restart is not None:
             auto_check_restart.set()
     except Exception:
@@ -2748,6 +2751,9 @@ from autoteam.config import (
 from autoteam.config import (
     AUTO_CHECK_THRESHOLD as _DEFAULT_THRESHOLD,
 )
+from autoteam.config import (
+    AUTO_CHECK_SKIP_STANDBY_REUSE as _DEFAULT_SKIP_STANDBY_REUSE,
+)
 
 # 运行时可修改的巡检配置
 _auto_check_config = {
@@ -2757,6 +2763,7 @@ _auto_check_config = {
     "min_low": _DEFAULT_MIN_LOW,
     "retry_add_phone": _DEFAULT_RETRY_ADD_PHONE,
     "add_phone_max_retries": _DEFAULT_ADD_PHONE_MAX_RETRIES,
+    "skip_standby_reuse": _DEFAULT_SKIP_STANDBY_REUSE,
 }
 _auto_check_stop = threading.Event()
 _auto_check_restart = threading.Event()  # 配置变更时通知线程重启
@@ -3257,6 +3264,7 @@ class AutoCheckConfig(BaseModel):
     min_low: int = 2  # 触发轮转的最少账号数
     retry_add_phone: bool = True  # 是否自动重试 add_phone
     add_phone_max_retries: int = 3  # add_phone 最大自动重试次数
+    skip_standby_reuse: bool = False  # 跳过旧账号复用，直接注册新账号
 
 
 def _normalized_auto_check_config(cfg: AutoCheckConfig | dict[str, object]) -> dict[str, int | bool]:
@@ -3267,6 +3275,7 @@ def _normalized_auto_check_config(cfg: AutoCheckConfig | dict[str, object]) -> d
         min_low = cfg.min_low
         retry_add_phone = cfg.retry_add_phone
         add_phone_max_retries = cfg.add_phone_max_retries
+        skip_standby_reuse = cfg.skip_standby_reuse
     else:
         interval = cfg.get("interval", _auto_check_config.get("interval", _DEFAULT_INTERVAL))
         target_seats = cfg.get("target_seats", _auto_check_config.get("target_seats", _DEFAULT_TARGET_SEATS))
@@ -3279,6 +3288,10 @@ def _normalized_auto_check_config(cfg: AutoCheckConfig | dict[str, object]) -> d
             "add_phone_max_retries",
             _auto_check_config.get("add_phone_max_retries", _DEFAULT_ADD_PHONE_MAX_RETRIES),
         )
+        skip_standby_reuse = cfg.get(
+            "skip_standby_reuse",
+            _auto_check_config.get("skip_standby_reuse", _DEFAULT_SKIP_STANDBY_REUSE),
+        )
 
     return {
         "interval": max(60, int(interval)),
@@ -3287,6 +3300,7 @@ def _normalized_auto_check_config(cfg: AutoCheckConfig | dict[str, object]) -> d
         "min_low": max(1, int(min_low)),
         "retry_add_phone": bool(retry_add_phone),
         "add_phone_max_retries": max(1, int(add_phone_max_retries)),
+        "skip_standby_reuse": bool(skip_standby_reuse),
     }
 
 
@@ -3295,6 +3309,7 @@ def get_auto_check_config():
     """获取巡检配置"""
     cfg = _auto_check_config.copy()
     cfg.setdefault("target_seats", _DEFAULT_TARGET_SEATS)
+    cfg.setdefault("skip_standby_reuse", _DEFAULT_SKIP_STANDBY_REUSE)
     return cfg
 
 
@@ -3313,6 +3328,7 @@ def set_auto_check_config(cfg: AutoCheckConfig):
         "AUTO_CHECK_MIN_LOW": str(normalized["min_low"]),
         "AUTO_CHECK_RETRY_ADD_PHONE": "true" if normalized["retry_add_phone"] else "false",
         "AUTO_CHECK_ADD_PHONE_MAX_RETRIES": str(normalized["add_phone_max_retries"]),
+        "AUTO_CHECK_SKIP_STANDBY_REUSE": "true" if normalized["skip_standby_reuse"] else "false",
     }
     for key, value in persisted.items():
         os.environ[key] = value
@@ -3321,13 +3337,14 @@ def set_auto_check_config(cfg: AutoCheckConfig):
     _sync_runtime_env_reload_state()
     _auto_check_restart.set()  # 唤醒巡检线程，立即应用新配置
     logger.info(
-        "[巡检] 配置已更新并持久化: 间隔=%ds 目标seat=%d 阈值=%d%% 触发=%d个 add_phone自动重试=%s 最大重试=%d",
+        "[巡检] 配置已更新并持久化: 间隔=%ds 目标seat=%d 阈值=%d%% 触发=%d个 add_phone自动重试=%s 最大重试=%d 跳过复用=%s",
         _auto_check_config["interval"],
         _auto_check_config["target_seats"],
         _auto_check_config["threshold"],
         _auto_check_config["min_low"],
         "开" if _auto_check_config["retry_add_phone"] else "关",
         _auto_check_config["add_phone_max_retries"],
+        "开" if _auto_check_config["skip_standby_reuse"] else "关",
     )
     return _auto_check_config.copy()
 
