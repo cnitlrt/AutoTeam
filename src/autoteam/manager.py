@@ -319,6 +319,7 @@ def _auth_repair_error_label(error_type: str | None) -> str:
         "token_exchange_failed": "token 交换失败",
         "non_team_plan": "未进入 Team workspace",
         "auth_code_missing": "未获取到 auth code",
+        "no_valid_organizations": "账号暂无有效 organization",
         "login_failed": "登录失败",
         "exception": "登录异常",
     }
@@ -574,6 +575,13 @@ def _login_codex_with_result(
             attempt + 1,
             max_attempts,
         )
+
+        if error_type == "no_valid_organizations":
+            logger.info(
+                "[Codex] %s 等待 5s 后重新登录...",
+                email,
+            )
+            time.sleep(5)
 
     return last_result or {
         "ok": False,
@@ -1467,7 +1475,11 @@ _DIRECT_EMAIL_SELECTORS = (
     'input[placeholder*="email" i], input[placeholder*="Email" i]'
 )
 _DIRECT_PASSWORD_SELECTORS = 'input[name="password"], input[type="password"]'
-_DIRECT_CODE_SELECTORS = 'input[name="code"], input[placeholder*="验证码"], input[placeholder*="code" i]'
+_DIRECT_CODE_SELECTORS = (
+    'input[name="code"], input[inputmode="numeric"], input[autocomplete="one-time-code"], '
+    'input[placeholder*="验证码"], input[placeholder*="code" i]'
+)
+_DIRECT_CODE_SLOT_SELECTORS = 'input[maxlength="1"], input[data-input-otp], input[aria-label*="digit" i]'
 
 
 def _safe_invite_screenshot(page, name):
@@ -2096,14 +2108,46 @@ def _register_direct_once(
             return False
 
         code_input = None
-        try:
-            code_input = page.locator(_DIRECT_CODE_SELECTORS).first
-            if not code_input.is_visible(timeout=5000):
-                code_input = None
-        except Exception:
-            code_input = None
+        slot_inputs = []
+        expect_code = current_step == "code"
+        wait_deadline = time.time() + (15 if expect_code else 5)
+        while time.time() < wait_deadline:
+            try:
+                candidate = page.locator(_DIRECT_CODE_SELECTORS).first
+                if candidate.is_visible(timeout=300):
+                    code_input = candidate
+                    break
+            except Exception:
+                pass
+            try:
+                candidates = page.locator(_DIRECT_CODE_SLOT_SELECTORS).all()
+                visible_slots = []
+                for loc in candidates:
+                    try:
+                        if loc.is_visible(timeout=150):
+                            visible_slots.append(loc)
+                    except Exception:
+                        continue
+                if len(visible_slots) >= 4:
+                    slot_inputs = visible_slots
+                    break
+            except Exception:
+                pass
+            if not expect_code:
+                break
+            time.sleep(0.4)
 
-        if code_input:
+        if expect_code and not code_input and not slot_inputs:
+            logger.warning(
+                "[直接注册] 验证码页未识别到输入框 | URL: %s | body=%s",
+                page.url,
+                _page_excerpt(page),
+            )
+            _safe_invite_screenshot(page, "direct_04b_code_not_found.png")
+            browser.close()
+            return False
+
+        if code_input or slot_inputs:
             logger.info("[直接注册] 等待验证码...")
             verification_code = None
             start_t = time.time()
@@ -2119,16 +2163,46 @@ def _register_direct_once(
                 print(f"\r  等待验证码... ({elapsed}s)", end="", flush=True)
                 time.sleep(3)
 
-            if verification_code:
-                logger.info("[直接注册] 输入验证码: %s", verification_code)
-                code_input.fill(verification_code)
-                time.sleep(0.5)
-                _click_primary_auth_button(page, code_input, ["Continue", "继续"])
-                time.sleep(8)
-            else:
+            if not verification_code:
                 logger.error("[直接注册] 未收到验证码")
                 browser.close()
                 return False
+
+            logger.info("[直接注册] 输入验证码: %s", verification_code)
+            code_value = str(verification_code).strip()
+            if slot_inputs:
+                logger.info("[直接注册] 检测到 %d 个分格验证码输入框", len(slot_inputs))
+                for index, char in enumerate(code_value):
+                    if index >= len(slot_inputs):
+                        break
+                    loc = slot_inputs[index]
+                    try:
+                        loc.click(force=True)
+                    except Exception:
+                        pass
+                    try:
+                        loc.fill("")
+                    except Exception:
+                        pass
+                    try:
+                        loc.fill(char)
+                    except Exception:
+                        try:
+                            loc.type(char, delay=50)
+                        except Exception:
+                            try:
+                                page.keyboard.type(char, delay=50)
+                            except Exception:
+                                pass
+                    time.sleep(0.1)
+                submit_anchor = slot_inputs[-1]
+            else:
+                code_input.fill(code_value)
+                submit_anchor = code_input
+
+            time.sleep(0.5)
+            _click_primary_auth_button(page, submit_anchor, ["Continue", "继续", "Verify", "验证"])
+            time.sleep(8)
 
         _safe_invite_screenshot(page, "direct_05_after_code.png")
         logger.info("[直接注册] 当前 URL: %s", page.url)
@@ -2334,14 +2408,16 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
     TARGET = target_seats
     ACTIVE_TARGET = _pool_active_target(TARGET)
 
-    from autoteam.config import AUTO_CHECK_THRESHOLD
+    from autoteam.config import AUTO_CHECK_SKIP_STANDBY_REUSE, AUTO_CHECK_THRESHOLD
 
     try:
         from autoteam.api import _auto_check_config
 
         threshold = _auto_check_config.get("threshold", AUTO_CHECK_THRESHOLD)
+        skip_standby_reuse = bool(_auto_check_config.get("skip_standby_reuse", AUTO_CHECK_SKIP_STANDBY_REUSE))
     except ImportError:
         threshold = AUTO_CHECK_THRESHOLD
+        skip_standby_reuse = AUTO_CHECK_SKIP_STANDBY_REUSE
 
     chatgpt = None
     mail_client = None
@@ -2475,13 +2551,17 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
         old_email = candidate["email"]
         logger.info("[4/5] seat=2 且检测到需要切换的子号，尝试先预切换再移除旧号: %s", old_email)
 
-        standby_list = [
-            a
-            for a in get_standby_accounts()
-            if not _is_main_account_email(a.get("email"))
-            and not is_account_disabled(a)
-            and _normalized_email(a.get("email")) != _normalized_email(old_email)
-        ]
+        if skip_standby_reuse:
+            standby_list = []
+            logger.info("[4/5] seat=2 预切换：已开启“跳过复用旧账号”，直接创建新账号")
+        else:
+            standby_list = [
+                a
+                for a in get_standby_accounts()
+                if not _is_main_account_email(a.get("email"))
+                and not is_account_disabled(a)
+                and _normalized_email(a.get("email")) != _normalized_email(old_email)
+            ]
 
         replacement_email = None
         for acc in standby_list:
@@ -2731,11 +2811,15 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
 
         # 优先复用旧账号（先验证额度是否真的恢复了）
         filled = 0
-        standby_list = [
-            a
-            for a in get_standby_accounts()
-            if not _is_main_account_email(a.get("email")) and not is_account_disabled(a)
-        ]
+        if skip_standby_reuse:
+            standby_list = []
+            logger.info("[4/5] 已开启“跳过复用旧账号”，跳过 standby 复用阶段，直接进入新账号注册")
+        else:
+            standby_list = [
+                a
+                for a in get_standby_accounts()
+                if not _is_main_account_email(a.get("email")) and not is_account_disabled(a)
+            ]
         quota_skipped = []
         auto_reuse_skipped = []
         retry_throttled = []
