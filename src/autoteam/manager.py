@@ -1467,7 +1467,11 @@ _DIRECT_EMAIL_SELECTORS = (
     'input[placeholder*="email" i], input[placeholder*="Email" i]'
 )
 _DIRECT_PASSWORD_SELECTORS = 'input[name="password"], input[type="password"]'
-_DIRECT_CODE_SELECTORS = 'input[name="code"], input[placeholder*="验证码"], input[placeholder*="code" i]'
+_DIRECT_CODE_SELECTORS = (
+    'input[name="code"], input[inputmode="numeric"], input[autocomplete="one-time-code"], '
+    'input[placeholder*="验证码"], input[placeholder*="code" i]'
+)
+_DIRECT_CODE_SLOT_SELECTORS = 'input[maxlength="1"], input[data-input-otp], input[aria-label*="digit" i]'
 
 
 def _safe_invite_screenshot(page, name):
@@ -2096,14 +2100,46 @@ def _register_direct_once(
             return False
 
         code_input = None
-        try:
-            code_input = page.locator(_DIRECT_CODE_SELECTORS).first
-            if not code_input.is_visible(timeout=5000):
-                code_input = None
-        except Exception:
-            code_input = None
+        slot_inputs = []
+        expect_code = current_step == "code"
+        wait_deadline = time.time() + (15 if expect_code else 5)
+        while time.time() < wait_deadline:
+            try:
+                candidate = page.locator(_DIRECT_CODE_SELECTORS).first
+                if candidate.is_visible(timeout=300):
+                    code_input = candidate
+                    break
+            except Exception:
+                pass
+            try:
+                candidates = page.locator(_DIRECT_CODE_SLOT_SELECTORS).all()
+                visible_slots = []
+                for loc in candidates:
+                    try:
+                        if loc.is_visible(timeout=150):
+                            visible_slots.append(loc)
+                    except Exception:
+                        continue
+                if len(visible_slots) >= 4:
+                    slot_inputs = visible_slots
+                    break
+            except Exception:
+                pass
+            if not expect_code:
+                break
+            time.sleep(0.4)
 
-        if code_input:
+        if expect_code and not code_input and not slot_inputs:
+            logger.warning(
+                "[直接注册] 验证码页未识别到输入框 | URL: %s | body=%s",
+                page.url,
+                _page_excerpt(page),
+            )
+            _safe_invite_screenshot(page, "direct_04b_code_not_found.png")
+            browser.close()
+            return False
+
+        if code_input or slot_inputs:
             logger.info("[直接注册] 等待验证码...")
             verification_code = None
             start_t = time.time()
@@ -2119,16 +2155,46 @@ def _register_direct_once(
                 print(f"\r  等待验证码... ({elapsed}s)", end="", flush=True)
                 time.sleep(3)
 
-            if verification_code:
-                logger.info("[直接注册] 输入验证码: %s", verification_code)
-                code_input.fill(verification_code)
-                time.sleep(0.5)
-                _click_primary_auth_button(page, code_input, ["Continue", "继续"])
-                time.sleep(8)
-            else:
+            if not verification_code:
                 logger.error("[直接注册] 未收到验证码")
                 browser.close()
                 return False
+
+            logger.info("[直接注册] 输入验证码: %s", verification_code)
+            code_value = str(verification_code).strip()
+            if slot_inputs:
+                logger.info("[直接注册] 检测到 %d 个分格验证码输入框", len(slot_inputs))
+                for index, char in enumerate(code_value):
+                    if index >= len(slot_inputs):
+                        break
+                    loc = slot_inputs[index]
+                    try:
+                        loc.click(force=True)
+                    except Exception:
+                        pass
+                    try:
+                        loc.fill("")
+                    except Exception:
+                        pass
+                    try:
+                        loc.fill(char)
+                    except Exception:
+                        try:
+                            loc.type(char, delay=50)
+                        except Exception:
+                            try:
+                                page.keyboard.type(char, delay=50)
+                            except Exception:
+                                pass
+                    time.sleep(0.1)
+                submit_anchor = slot_inputs[-1]
+            else:
+                code_input.fill(code_value)
+                submit_anchor = code_input
+
+            time.sleep(0.5)
+            _click_primary_auth_button(page, submit_anchor, ["Continue", "继续", "Verify", "验证"])
+            time.sleep(8)
 
         _safe_invite_screenshot(page, "direct_05_after_code.png")
         logger.info("[直接注册] 当前 URL: %s", page.url)
