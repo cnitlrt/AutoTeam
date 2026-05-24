@@ -2748,13 +2748,13 @@ from autoteam.config import (
     AUTO_CHECK_RETRY_ADD_PHONE as _DEFAULT_RETRY_ADD_PHONE,
 )
 from autoteam.config import (
+    AUTO_CHECK_SKIP_STANDBY_REUSE as _DEFAULT_SKIP_STANDBY_REUSE,
+)
+from autoteam.config import (
     AUTO_CHECK_TARGET_SEATS as _DEFAULT_TARGET_SEATS,
 )
 from autoteam.config import (
     AUTO_CHECK_THRESHOLD as _DEFAULT_THRESHOLD,
-)
-from autoteam.config import (
-    AUTO_CHECK_SKIP_STANDBY_REUSE as _DEFAULT_SKIP_STANDBY_REUSE,
 )
 
 # 运行时可修改的巡检配置

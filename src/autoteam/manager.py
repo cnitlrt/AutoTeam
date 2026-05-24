@@ -2414,9 +2414,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
         from autoteam.api import _auto_check_config
 
         threshold = _auto_check_config.get("threshold", AUTO_CHECK_THRESHOLD)
-        skip_standby_reuse = bool(
-            _auto_check_config.get("skip_standby_reuse", AUTO_CHECK_SKIP_STANDBY_REUSE)
-        )
+        skip_standby_reuse = bool(_auto_check_config.get("skip_standby_reuse", AUTO_CHECK_SKIP_STANDBY_REUSE))
     except ImportError:
         threshold = AUTO_CHECK_THRESHOLD
         skip_standby_reuse = AUTO_CHECK_SKIP_STANDBY_REUSE
