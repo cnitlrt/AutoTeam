@@ -2284,16 +2284,17 @@ def post_account_login(params: LoginAccountParams):
         from autoteam.accounts import STATUS_ACTIVE, update_account
         from autoteam.codex_auth import (
             check_codex_quota,
-            login_codex_via_browser,
             quota_result_quota_info,
             quota_result_resets_at,
             save_auth_file,
         )
         from autoteam.mail_provider import get_mail_client_for_account
+        from autoteam.manager import _login_codex_with_result
 
         mail_client = get_mail_client_for_account(acc)
         mail_client.login()
-        bundle = login_codex_via_browser(email, acc.get("password", ""), mail_client=mail_client)
+        login_result = _login_codex_with_result(email, acc.get("password", ""), mail_client=mail_client)
+        bundle = login_result.get("bundle") if login_result.get("ok") else None
         if bundle:
             plan_type = str(bundle.get("plan_type") or "").lower()
             if plan_type != "team":
@@ -2324,7 +2325,8 @@ def post_account_login(params: LoginAccountParams):
 
             sync_to_cpa()
             return {"email": email, "plan": bundle.get("plan_type"), "auth_file": auth_file}
-        raise RuntimeError(f"Codex 登录失败: {email}")
+        detail = login_result.get("error_detail") or login_result.get("error_type") or "登录失败"
+        raise RuntimeError(f"Codex 登录失败（{detail}）: {email}")
 
     task = _start_task(f"login:{email}", _run, {"email": email})
     return task

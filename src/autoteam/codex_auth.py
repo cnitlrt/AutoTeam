@@ -77,6 +77,8 @@ def _classify_oauth_failure(url, body_excerpt=""):
     url = (url or "").lower()
     body = (body_excerpt or "").lower()
 
+    if "no_valid_organizations" in url or "no_valid_organizations" in body:
+        return "no_valid_organizations", "账号暂无有效 organization（可能 provisioning 未完成）", True
     if "add-phone" in url:
         return "add_phone", "需要手机号验证", False
     if "choose-an-account" in url:
@@ -931,17 +933,25 @@ def login_codex_via_browser(
         logger.info("[Codex] 先登录 ChatGPT 选择 Team workspace...")
         _page = context.new_page()
         _page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded", timeout=60000)
+        logger.info("[Codex] ChatGPT 登录页已加载: %s", _page.url)
         time.sleep(5)
 
         # Cloudflare
+        cf_hit = False
         for _i in range(12):
             if "verify you are human" not in _page.content()[:2000].lower():
+                if cf_hit:
+                    logger.info("[Codex] Cloudflare 已通过")
                 break
+            if not cf_hit:
+                logger.info("[Codex] 检测到 Cloudflare 人机验证，等待...")
+                cf_hit = True
             time.sleep(5)
 
         # 点击登录
         try:
             _page.locator('button:has-text("登录"), button:has-text("Log in")').first.click()
+            logger.info("[Codex] 已点击登录按钮")
             time.sleep(3)
         except Exception:
             pass
@@ -953,6 +963,7 @@ def login_codex_via_browser(
                 ei.fill(email)
                 time.sleep(0.5)
                 _click_primary_auth_button(_page, ei, ["Continue", "继续"])
+                logger.info("[Codex] 邮箱已提交，等待密码/验证码页...")
                 time.sleep(3)
         except Exception:
             pass
@@ -965,6 +976,7 @@ def login_codex_via_browser(
                     pi.fill(password)
                     time.sleep(0.5)
                     _click_primary_auth_button(_page, pi, ["Continue", "继续", "Log in"])
+                    logger.info("[Codex] 密码已提交")
                 else:
                     # 没有密码，点击"使用一次性验证码登录"
                     otp_btn = _page.locator(

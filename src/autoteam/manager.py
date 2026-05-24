@@ -319,6 +319,7 @@ def _auth_repair_error_label(error_type: str | None) -> str:
         "token_exchange_failed": "token 交换失败",
         "non_team_plan": "未进入 Team workspace",
         "auth_code_missing": "未获取到 auth code",
+        "no_valid_organizations": "账号暂无有效 organization",
         "login_failed": "登录失败",
         "exception": "登录异常",
     }
@@ -574,6 +575,13 @@ def _login_codex_with_result(
             attempt + 1,
             max_attempts,
         )
+
+        if error_type == "no_valid_organizations":
+            logger.info(
+                "[Codex] %s 等待 5s 后重新登录...",
+                email,
+            )
+            time.sleep(5)
 
     return last_result or {
         "ok": False,
